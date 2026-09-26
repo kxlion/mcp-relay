@@ -1,0 +1,49 @@
+[project]
+name = "mcp-relay"
+version = "0.1.0"
+description = "Constrained MCP relay for explicitly enabled local capabilities"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "fastmcp>=4,<5",
+    "httpx2>=2.11,<3",
+    "mcp>=2.2,<3",
+    "pydantic>=2.8,<3",
+    "python-dotenv>=1.0,<2",
+    "pyyaml>=6,<7",
+    "typing-extensions>=4.8,<5",
+    "uvicorn>=0.30,<1",
+    "websockets>=17,<18",
+]
+
+[project.scripts]
+mcp-relay = "mcp_relay.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=6,<8",
+    "ruff>=0.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_relay"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: real loopback network tests"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]

@@ -1,0 +1,175 @@
+# CI for mcp-relay: quality + unit tests on Linux, then E2E (integration
+# suite including the filesystem bench) on Ubuntu and Windows in parallel,
+# then a fail-closed aggregate gate. No publication/deployment anywhere.
+#
+# Third-party actions are pinned to full commit SHAs (version in comment).
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run per PR/ref; never cancel runs of other PRs.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: Lockfile is up to date
+        run: uv lock --check
+
+      - name: Whitespace check
+        run: git diff --check
+
+      - name: Lint (ruff)
+        run: uv run --frozen ruff check .
+
+      - name: Unit tests
+        run: uv run --frozen python -m pytest -q -ra -m "not integration" --junitxml=reports/unit.xml
+
+      - name: No tracked file was modified
+        run: |
+          dirty="$(git status --porcelain --untracked-files=no)"
+          if [ -n "$dirty" ]; then
+            echo "::error::Tracked files were modified by the test run:"
+            printf '%s\n' "$dirty"
+            exit 1
+          fi
+
+      - name: Upload unit test report
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: reports-checks
+          path: reports/unit.xml
+          retention-days: 7
+          if-no-files-found: error
+
+  e2e:
+    name: e2e ${{ matrix.label }}
+    needs: checks
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux
+          - os: windows-latest
+            label: windows
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --locked --group dev
+
+      - name: Install Node.js (for the fs bench)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      # Real user path: install with the one-line installer from THIS
+      # checkout (not GitHub main). No onboarding, no shell-profile writes.
+      - name: One-line installer (user path, Linux)
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        env:
+          MCP_RELAY_PROJECT_ROOT: ${{ github.workspace }}
+          MCP_RELAY_SETUP: skip
+          MCP_RELAY_SKIP_PATH_UPDATE: "1"
+        run: bash scripts/install.sh
+
+      - name: One-line installer (user path, Windows)
+        if: ${{ matrix.os == 'windows-latest' }}
+        env:
+          MCP_RELAY_PROJECT_ROOT: ${{ github.workspace }}
+          MCP_RELAY_SETUP: skip
+          MCP_RELAY_SKIP_PATH_UPDATE: "1"
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
+
+      - name: Expose installed binary to the bench
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            printf 'MCP_RELAY_BIN=%s\n' "$(uv tool dir --bin)/mcp-relay.exe" >> "$GITHUB_ENV"
+          else
+            printf 'MCP_RELAY_BIN=%s\n' "$(uv tool dir --bin)/mcp-relay" >> "$GITHUB_ENV"
+          fi
+
+      - name: Installed binary answers
+        run: |
+          "$MCP_RELAY_BIN" --version
+          "$MCP_RELAY_BIN" --help >/dev/null
+
+      # No skips: the fs bench fails the job if node/npx or the pinned
+      # @modelcontextprotocol/server-filesystem install is unavailable.
+      # MCP_RELAY_BIN makes the bench drive the INSTALLED binary.
+      - name: Integration + E2E bench
+        run: uv run --frozen python -m pytest -q -ra -m integration --junitxml=reports/integration.xml
+
+      - name: Upload integration report
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: reports-e2e-${{ matrix.label }}
+          path: reports/integration.xml
+          retention-days: 7
+          if-no-files-found: error
+
+  # Fail-closed aggregate gate: success ONLY if checks AND every e2e matrix
+  # leg succeeded. failure, cancelled, skipped or a missing result = red.
+  ci-required:
+    name: ci-required
+    needs: [checks, e2e]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Evaluate gate
+        run: |
+          results=("${{ needs.checks.result }}" "${{ needs.e2e.result }}")
+          ok=true
+          for result in "${results[@]}"; do
+            if [ "$result" != "success" ]; then
+              echo "::error::required job result is '$result' (expected 'success')"
+              ok=false
+            fi
+          done
+          if [ "$ok" != "true" ]; then
+            exit 1
+          fi
+          echo "All required jobs succeeded."

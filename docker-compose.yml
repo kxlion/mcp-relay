@@ -1,0 +1,20 @@
+# Two-listener MVP deployment for a Linux host: MCP on 8000, WS on 8001.
+# `ports` publishes both Server listeners to the host; a private Compose-only
+# topology would use `expose` instead and keep the listeners off the host
+# network. Keep credentials in the ignored .env file, never in this file.
+services:
+  relay-server:
+    build: .
+    image: mcp-relay
+    command: ["server"]
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+    environment:
+      RELAY_SERVER_MCP_HOST: "0.0.0.0"
+      RELAY_SERVER_MCP_PORT: "8000"
+      RELAY_SERVER_CLIENT_HOST: "0.0.0.0"
+      RELAY_SERVER_CLIENT_PORT: "8001"
+      RELAY_MCP_TOKEN: "${RELAY_MCP_TOKEN:?set RELAY_MCP_TOKEN}"
+      RELAY_CLIENT_TOKEN: "${RELAY_CLIENT_TOKEN:?set RELAY_CLIENT_TOKEN}"
