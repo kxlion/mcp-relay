@@ -348,13 +348,13 @@ def test_real_filesystem_e2e_bench(tmp_path: pathlib.Path) -> None:
 
                             # The fs tools are now native MCP tools of the Relay.
                             published = await wait_for_names(
-                                lambda n: f"{ALIAS}__read_text_file" in n
+                                lambda n: f"{ALIAS}_read_text_file" in n
                             )
                             assert {
-                                f"{ALIAS}__list_directory",
-                                f"{ALIAS}__write_file",
-                                f"{ALIAS}__read_text_file",
-                                f"{ALIAS}__get_file_info",
+                                f"{ALIAS}_list_directory",
+                                f"{ALIAS}_write_file",
+                                f"{ALIAS}_read_text_file",
+                                f"{ALIAS}_get_file_info",
                             } <= published, published
                             status = await invoke("relay_status", {})
                             [server] = status["mcp_servers"]
@@ -362,13 +362,13 @@ def test_real_filesystem_e2e_bench(tmp_path: pathlib.Path) -> None:
                             assert server["runtime_state"] == "running"
                             assert server["transport"] == "stdio"
                             assert server["published_tools"] == len(
-                                [name for name in published if name.startswith(f"{ALIAS}__")]
+                                [name for name in published if name.startswith(f"{ALIAS}_")]
                             )
 
                             async def relayed(
                                 tool: str, arguments: dict[str, Any]
                             ) -> Any:
-                                command = await session.call_tool(f"{ALIAS}__{tool}", arguments)
+                                command = await session.call_tool(f"{ALIAS}_{tool}", arguments)
                                 assert command.is_error is False, f"{tool}: {command}"
                                 payload = _structured(
                                     command.structured_content
@@ -435,7 +435,7 @@ def test_real_filesystem_e2e_bench(tmp_path: pathlib.Path) -> None:
                             await wait_for_names(lambda n: n == RELAY_SURFACE)
                             enabled = await invoke("relay_mcp_enable", {"alias": ALIAS})
                             assert enabled["runtime_state"] == "running", enabled
-                            await wait_for_names(lambda n: f"{ALIAS}__read_text_file" in n)
+                            await wait_for_names(lambda n: f"{ALIAS}_read_text_file" in n)
 
                             deleted = await invoke("relay_mcp_delete", {"alias": ALIAS})
                             assert deleted == {"alias": ALIAS, "status": "deleted"}

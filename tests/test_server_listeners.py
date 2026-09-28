@@ -781,7 +781,7 @@ def test_real_dual_listener_runtime_relays_on_exact_reserved_ports(
         try:
             await _wait_until(
                 lambda: bool(listener_apps)
-                and listener_apps[0][0].state.registry.catalog_tool("probe__status")
+                and listener_apps[0][0].state.registry.catalog_tool("probe_status")
                 is not None
             )
             mcp_app, client_app = listener_apps[0]
@@ -806,8 +806,8 @@ def test_real_dual_listener_runtime_relays_on_exact_reserved_ports(
                     async with ClientSession(read_stream, write_stream) as session:
                         await session.initialize()
                         published = {tool.name for tool in (await session.list_tools()).tools}
-                        assert "probe__status" in published
-                        result = await session.call_tool("probe__status", {})
+                        assert "probe_status" in published
+                        result = await session.call_tool("probe_status", {})
 
             assert result.is_error is False
             payload = result.structured_content
@@ -1137,7 +1137,7 @@ def test_listener_failure_cancels_inflight_call_and_cleans_runtime(
                 ) as (read_stream, write_stream):
                     async with ClientSession(read_stream, write_stream) as session:
                         await session.initialize()
-                        return await session.call_tool("probe__status", {})
+                        return await session.call_tool("probe_status", {})
 
         call_task: asyncio.Task[object] | None = None
         outcome: object | BaseException | None = None
@@ -1147,7 +1147,7 @@ def test_listener_failure_cancels_inflight_call_and_cleans_runtime(
                 and runtime_servers[0].started
                 and runtime_servers[1].started
                 and runtime_servers[0].config.app.state.registry.catalog_tool(
-                    "probe__status"
+                    "probe_status"
                 )
                 is not None
             )

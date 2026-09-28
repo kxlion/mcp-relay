@@ -814,7 +814,7 @@ def test_handshake_sends_token_free_register_capabilities_then_catalog(tmp_path:
         assert capabilities["admin"] is True
         assert capabilities["relay_contract"] == RELAY_CONTRACT
         assert catalog["type"] == "catalog"
-        assert [tool["name"] for tool in catalog["tools"]] == ["sample__click"]
+        assert [tool["name"] for tool in catalog["tools"]] == ["sample_click"]
 
     asyncio.run(scenario())
 
@@ -832,6 +832,20 @@ def test_catalog_changes_are_pushed_once_and_duplicates_are_skipped(tmp_path: Pa
         client.catalog_changed()
         await _until(socket, lambda _: len(_frames(socket, "catalog")) == 2)
         assert _frames(socket, "catalog")[-1]["tools"] == []
+        await _stop(client, task)
+
+    asyncio.run(scenario())
+
+
+def test_an_empty_catalog_is_not_sent_at_session_start(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        client = _session_client(tmp_path, _Tool())
+        client.catalog.remove_alias("sample")
+        socket = _Socket([_registered()])
+        task = asyncio.create_task(client.run_session(socket))
+        await _until(socket, lambda _: bool(_frames(socket, "capabilities")))
+        await asyncio.sleep(0.2)
+        assert _frames(socket, "catalog") == []
         await _stop(client, task)
 
     asyncio.run(scenario())
@@ -980,7 +994,8 @@ def test_initial_reconciliation_runs_in_background_and_stops_on_close(tmp_path: 
         client.hub = hub  # type: ignore[assignment]
         client.start_initial_reconciliation()
         socket = _Socket([_registered()])
-        task = await _session(client, socket)
+        task = asyncio.create_task(client.run_session(socket))
+        await _until(socket, lambda _: bool(_frames(socket, "capabilities")))
         assert hub.started.is_set()
         await _stop(client, task)
         await client.aclose()

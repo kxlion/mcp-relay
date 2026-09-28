@@ -3,7 +3,7 @@
 The hub owns transports; this module only stores what the hub publishes for
 each alias and derives the catalog the Server exposes as native MCP tools.
 
-Public names are ``<alias>__<tool>``. A tool name outside the portable
+Public names are ``<alias>_<tool>``. A tool name outside the portable
 ``[A-Za-z0-9_-]`` alphabet, or too long, gets a readable truncated form plus
 a short SHA-256 suffix of its exact identity, so a name never depends on the
 other tools present. The Server never parses a public name: every catalog
@@ -39,11 +39,12 @@ class CatalogError(Exception):
 
 def public_tool_name(alias: str, tool: str) -> str:
     """Return the stable public name of one ``(alias, tool)`` identity."""
-    name = f"{alias}__{tool}"
+    # Aliases hold only lowercase letters, so the first "_" ends the alias.
+    name = f"{alias}_{tool}"
     if _PORTABLE_NAME.fullmatch(tool) and len(name) <= MAX_PUBLIC_TOOL_NAME_LENGTH:
         return name
     digest = hashlib.sha256(f"{alias}\0{tool}".encode()).hexdigest()[:_HASH_LENGTH]
-    readable = f"{alias}__{_UNPORTABLE_CHARS.sub('_', tool)}"
+    readable = f"{alias}_{_UNPORTABLE_CHARS.sub('_', tool)}"
     return f"{readable[: MAX_PUBLIC_TOOL_NAME_LENGTH - _HASH_LENGTH - 1]}_{digest}"
 
 

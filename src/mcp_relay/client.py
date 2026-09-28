@@ -736,7 +736,8 @@ class RelayClient:
 
     async def _push_catalog(self, socket: TextSocket) -> None:
         """Send the catalog on session start and after every effective change."""
-        last_sent: list[dict[str, Any]] | None = None
+        # A fresh registration starts with an empty catalog on the Server.
+        last_sent: list[dict[str, Any]] = []
         while True:
             await self._catalog_dirty.wait()
             # Coalesce a burst of hub changes into one frame.

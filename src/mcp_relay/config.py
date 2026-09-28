@@ -51,7 +51,8 @@ MCP_ALIAS_PATTERN = re.compile(r"^[a-z]{1,16}$")
 # Words owned by the Relay dispatcher itself. They are never usable as MCP
 # server aliases: they identify fixed Relay operations (client.*, mcp.*,
 # server-local tools), not third-party servers.
-RESERVED_MCP_ALIASES = frozenset({"client", "mcp", "server"})
+# ``relay`` would publish ``relay_*`` names that shadow the Relay tools.
+RESERVED_MCP_ALIASES = frozenset({"client", "mcp", "relay", "server"})
 MCP_ALIAS_ENV_DIRNAME = "mcp"
 MCP_ENV_MAX_KEYS = 32
 MCP_ENV_MAX_BYTES = DOTENV_MAX_BYTES

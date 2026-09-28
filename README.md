@@ -50,7 +50,7 @@ flowchart LR
 - **Relay Client** connects your local MCP servers under names you choose.
 
 The tools of your local MCP servers appear directly in your AI's tool list,
-named `<alias>__<tool>` (for example `localtools__read_file`), and the list
+named `<alias>_<tool>` (for example `localtools_read_file`), and the list
 updates itself when servers start, stop or change. `relay_status` reports the
 state of the whole chain. You can restrict each server to the tools you want
 your AI to see.

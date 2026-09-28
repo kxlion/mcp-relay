@@ -139,18 +139,18 @@ def test_registry_keeps_the_catalog_until_disconnect_and_signals_changes() -> No
             ),
         )
     )
-    tool = {"name": "fs__read", "alias": "fs", "tool": "read", "input_schema": {"type": "object"}}
+    tool = {"name": "fs_read", "alias": "fs", "tool": "read", "input_schema": {"type": "object"}}
     run(registry.set_catalog(socket, Catalog(version=2, type="catalog", tools=[tool])))
 
     assert registry.client_admin is True
-    assert [entry.name for entry in registry.catalog] == ["fs__read"]
-    assert registry.catalog_tool("fs__read").tool == "read"
+    assert [entry.name for entry in registry.catalog] == ["fs_read"]
+    assert registry.catalog_tool("fs_read").tool == "read"
     assert run(registry.status_snapshot()).published_tools == 1
 
     run(registry.disconnect(socket))
     assert registry.catalog == ()
     assert registry.client_admin is False
-    assert registry.catalog_tool("fs__read") is None
+    assert registry.catalog_tool("fs_read") is None
     assert changes == ["changed", "changed", "changed"]
 
 
