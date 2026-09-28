@@ -1,8 +1,6 @@
-"""Tranche 3: the hub's FastMCP client transports against real servers.
+"""The hub's FastMCP client transports against real servers.
 
-The historic relay transports (``StdioMcpTransport``/``HttpMcpTransport``
-wrapping a private owner task) are replaced by ``fastmcp.Client``. These
-tests lock the observable contracts any implementation must reproduce:
+These tests lock the observable contracts:
 
 - a real synthetic stdio MCP server is spawned, listed, called, and the
   child process is reaped on close (no orphans);

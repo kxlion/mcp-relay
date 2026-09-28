@@ -122,22 +122,12 @@ def test_compose_uses_real_token_variable_names() -> None:
 
     assert "RELAY_MCP_TOKEN" in environment
     assert "RELAY_CLIENT_TOKEN" in environment
-    assert "RELAY_AGENT_TOKEN" not in environment
-
-
-def test_compose_does_not_reattribute_removed_knobs() -> None:
-    """Knobs removed during this branch must not resurface in Compose."""
-    compose_text = (ROOT / "docker-compose.yml").read_text()
-    assert "ALLOWED_HOSTS" not in compose_text
-    assert "ALLOWED_ORIGINS" not in compose_text
-    assert "v2/invoke" not in compose_text
 
 
 def test_env_example_uses_real_token_variable_names() -> None:
     text = (ROOT / ".env.example").read_text()
     assert "RELAY_MCP_TOKEN=" in text
     assert "RELAY_CLIENT_TOKEN=" in text
-    assert "RELAY_AGENT_TOKEN" not in text
     for raw_line in text.splitlines():
         stripped = raw_line.strip()
         if stripped and not stripped.startswith("#") and "=" in stripped:

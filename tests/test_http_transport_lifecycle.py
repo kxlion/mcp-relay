@@ -1,8 +1,7 @@
 """Real HTTP SDK lifecycle in a subprocess with an external deadlock deadline.
 
-Kept as a subprocess-isolated replay of the HTTP contracts against the
-FastMCP-backed transport (Tranche 3): list, concurrent calls, cross-task
-close, terminal semantics.
+Subprocess-isolated replay of the HTTP transport contracts: list,
+concurrent calls, cross-task close, terminal semantics.
 """
 
 from __future__ import annotations

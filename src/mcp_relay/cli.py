@@ -224,22 +224,6 @@ class OnboardingOptions:
     workspace: str | None = None
     check: bool | None = None
 
-    @classmethod
-    def from_namespace(cls, args: object) -> "OnboardingOptions":
-        return cls(
-            role=getattr(args, "role"),
-            non_interactive=getattr(args, "non_interactive"),
-            force=getattr(args, "force"),
-            mcp_host=getattr(args, "mcp_host"),
-            mcp_port=getattr(args, "mcp_port"),
-            client_host=getattr(args, "client_host"),
-            client_port=getattr(args, "client_port"),
-            topology=getattr(args, "topology"),
-            relay_url=getattr(args, "relay_url"),
-            workspace=getattr(args, "workspace"),
-            check=getattr(args, "check"),
-        )
-
 
 class _Prompter:
     def __init__(self, *, non_interactive: bool) -> None:

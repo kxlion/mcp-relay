@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Protocol
 
 from ..diagnostics import debug as _debug_log
@@ -102,17 +102,13 @@ class McpProviderToolClient:
         self._close_lock = asyncio.Lock()
         self._list_lock = asyncio.Lock()
         self._pending_tasks: set[asyncio.Task[object]] = set()
-        # Upstream ``tools/list_changed`` state: a notification immediately
-        # marks the inventory not executable; the bounded reread happens at
-        # discovery time, coalesced by the catalog refresh.
+        # False between an upstream ``tools/list_changed`` and a good re-read.
         self._inventory_valid = True
 
     async def list_tools(
         self, *, timeout_seconds: float | None = None
     ) -> Sequence[ProviderToolDescriptor]:
-        # Step 7A: the startup-budget caller may bound this one call with the
-        # remaining alias startup budget; without the override the ordinary
-        # client deadline (constructor timeout, 30 s in production) applies.
+        # The hub bounds the first listing by the remaining startup budget.
         budget = (
             self._timeout_seconds
             if timeout_seconds is None
@@ -144,30 +140,14 @@ class McpProviderToolClient:
         """The current cached descriptors without any transport I/O."""
         return self._tools
 
-    def bind_transport_notifications(self) -> None:
-        """React to the transport's upstream ``tools/list_changed`` hook.
-
-        Immediate invalidation, no provider-side task: the next bounded
-        discovery re-read (coalesced by the catalog refresh) restores
-        executability. This is the production wiring for the notification
-        contract; nothing spawns a retry loop.
-        """
-
-        async def _invalidated() -> None:
-            self.invalidate_inventory()
-
-        self._transport.on_tools_changed = _invalidated
+    def bind_transport_notifications(
+        self, on_tools_changed: Callable[[], Awaitable[None]]
+    ) -> None:
+        """Route the transport's upstream ``tools/list_changed`` to the owner."""
+        self._transport.on_tools_changed = on_tools_changed
 
     def invalidate_inventory(self) -> None:
-        """React to one upstream ``tools/list_changed`` notification.
-
-        Immediate and idempotent: from this call the cached inventory is not
-        executable — ``call_tool`` refuses without touching the transport and
-        ``list_tools`` performs the bounded reread (provider deadline), whose
-        success restores validity. Scheduling that reread belongs to the
-        catalog refresh, which coalesces per alias; the provider itself never
-        spawns a retry loop.
-        """
+        """Mark the cached inventory non-executable until the next re-read."""
         if self._closed:
             return
         self._inventory_valid = False

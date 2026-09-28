@@ -1,4 +1,4 @@
-"""Phase 2 slice 2: per-alias reconcile engine (``McpHub``) contracts."""
+"""Per-alias reconcile engine (``McpHub``) contracts."""
 
 from __future__ import annotations
 
@@ -31,6 +31,13 @@ from mcp_relay.output_models import ProviderToolResult
 from mcp_relay.provider_tools import ProviderToolDescriptor
 from mcp_relay.providers.base import DEFAULT_PROVIDER_TIMEOUT_SECONDS
 from mcp_relay.providers.mcp_client import McpProviderToolClient
+
+# One loop per module: the hub keeps per-alias watch tasks across calls.
+_LOOP = asyncio.new_event_loop()
+
+
+def _run(coroutine: Any) -> Any:
+    return _LOOP.run_until_complete(coroutine)
 
 
 def _write_yaml(path: Path, document: dict[str, object]) -> Path:
@@ -149,7 +156,7 @@ def test_startup_spawns_enabled_and_skips_disabled(tmp_path: Path) -> None:
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
 
-    statuses = asyncio.run(hub.reconcile_all())
+    statuses = _run(hub.reconcile_all())
 
     assert statuses["one"].state is AliasState.RUNNING
     assert statuses["two"].state is AliasState.DISABLED
@@ -167,7 +174,7 @@ def test_url_alias_uses_streamable_http_without_process(tmp_path: Path) -> None:
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
 
-    statuses = asyncio.run(hub.reconcile_all())
+    statuses = _run(hub.reconcile_all())
 
     assert statuses["httpd"].state is AliasState.RUNNING
     assert factory.launches[0].transport == "streamable_http"
@@ -184,7 +191,7 @@ def test_spawn_failure_is_retried_then_unavailable_isolated(tmp_path: Path) -> N
     factory = FactoryRecorder(fail_aliases={"broken"})
     hub = _hub(config_path, workspace, factory, attempts=3)
 
-    statuses = asyncio.run(hub.reconcile_all())
+    statuses = _run(hub.reconcile_all())
 
     assert statuses["broken"].state is AliasState.UNAVAILABLE
     assert statuses["healthy"].state is AliasState.RUNNING
@@ -216,7 +223,7 @@ def test_source_resolution_happens_at_spawn_time(tmp_path: Path) -> None:
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory, resolver=resolver)
 
-    statuses = asyncio.run(hub.reconcile_all())
+    statuses = _run(hub.reconcile_all())
 
     assert statuses["src"].state is AliasState.RUNNING
     assert resolved == [("io.example/author/server", None)]
@@ -262,7 +269,7 @@ def test_source_with_pin_resolves_the_pinned_version(tmp_path: Path) -> None:
 
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory, resolver=resolver)
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
     assert factory.launches[0].argv == ["npx", "-y", "server-pkg@9.9.9"]
 
 
@@ -315,7 +322,7 @@ def test_registry_unreachable_leaves_alias_unavailable(tmp_path: Path) -> None:
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
 
-    statuses = asyncio.run(hub.reconcile_all())
+    statuses = _run(hub.reconcile_all())
 
     assert statuses["src"].state is AliasState.UNAVAILABLE
     assert statuses["src"].last_error is not None
@@ -340,7 +347,7 @@ def test_unsupported_registry_type_maps_to_transport_unsupported(
 
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory, resolver=resolver)
-    statuses = asyncio.run(hub.reconcile_all())
+    statuses = _run(hub.reconcile_all())
     assert statuses["src"].state is AliasState.UNAVAILABLE
     assert statuses["src"].last_error is not None
     assert statuses["src"].last_error["code"] == "transport_unsupported"
@@ -354,7 +361,7 @@ def test_alias_env_reaches_the_transport_factory_not_the_yaml(tmp_path: Path) ->
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
 
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
 
     launch = factory.launches[0]
     assert launch.env.get("API_KEY") == "abc"
@@ -368,8 +375,8 @@ def test_reconcile_running_alias_with_same_config_is_a_no_op(tmp_path: Path) -> 
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
 
-    asyncio.run(hub.reconcile_all())
-    asyncio.run(hub.reconcile_alias("one"))
+    _run(hub.reconcile_all())
+    _run(hub.reconcile_alias("one"))
 
     assert len(factory.for_alias("one")) == 1
 
@@ -381,15 +388,15 @@ def test_disable_stops_and_enable_spawns_again(tmp_path: Path) -> None:
     mcp_entry_add(config_path, "one", {"command": ["/bin/one"]}, None)
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
 
     mcp_entry_set_enabled(config_path, "one", False)
-    status = asyncio.run(hub.reconcile_alias("one"))
+    status = _run(hub.reconcile_alias("one"))
     assert status.state is AliasState.DISABLED
     assert factory.for_alias("one")[0].closed
 
     mcp_entry_set_enabled(config_path, "one", True)
-    status = asyncio.run(hub.reconcile_alias("one"))
+    status = _run(hub.reconcile_alias("one"))
     assert status.state is AliasState.RUNNING
     assert len(factory.for_alias("one")) == 2
 
@@ -401,12 +408,12 @@ def test_bounce_stops_then_respawns_on_changed_entry(tmp_path: Path) -> None:
     mcp_entry_add(config_path, "one", {"command": ["/bin/one"]}, None)
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
 
     config.mcp_entry_replace(
         config_path, "one", {"command": ["/bin/one-v2"]}, None
     )
-    status = asyncio.run(hub.reconcile_alias("one"))
+    status = _run(hub.reconcile_alias("one"))
 
     assert status.state is AliasState.RUNNING
     transports = factory.for_alias("one")
@@ -422,9 +429,9 @@ def test_forget_stops_and_drops_the_alias(tmp_path: Path) -> None:
     mcp_entry_add(config_path, "one", {"command": ["/bin/one"]}, None)
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
 
-    asyncio.run(hub.forget("one"))
+    _run(hub.forget("one"))
 
     assert hub.runtime_states() == {}
     assert factory.for_alias("one")[0].closed
@@ -438,7 +445,7 @@ def test_disk_differs_reports_manual_yaml_edits(tmp_path: Path) -> None:
     mcp_entry_add(config_path, "two", {"command": ["/bin/two"]}, None)
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
     assert hub.disk_differs() == []
 
     config.mcp_entry_set_enabled(config_path, "two", False)
@@ -455,12 +462,12 @@ def test_provider_clients_expose_running_aliases_only(tmp_path: Path) -> None:
     mcp_entry_set_enabled(config_path, "off", False)
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
 
     clients = hub.provider_clients()
 
     assert set(clients) == {"one"}
-    descriptor = asyncio.run(clients["one"].list_tools())[0]
+    descriptor = _run(clients["one"].list_tools())[0]
     assert descriptor.provider_name == "one"
     assert descriptor.tool_name == "ping"
 
@@ -474,7 +481,7 @@ def test_alias_env_file_secrets_are_read_at_spawn_time(tmp_path: Path) -> None:
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
 
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
 
     assert factory.launches[0].env.get("TOKEN_ENV") == "later-value"
 
@@ -496,7 +503,7 @@ def test_desired_state_validation_failure_is_structured(tmp_path: Path) -> None:
     hub = _hub(config_path, workspace, factory)
 
     with pytest.raises(HubError) as excinfo:
-        asyncio.run(hub.desired_states())
+        _run(hub.desired_states())
     assert excinfo.value.code == "config_invalid"
     assert excinfo.value.details  # structured path/message details, no secrets
 
@@ -515,21 +522,19 @@ def test_publish_catalog_reflects_running_and_disabled_aliases(
     mcp_entry_add(config_path, "one", {"command": ["/bin/one"]}, None)
     mcp_entry_add(config_path, "off", {"command": ["/bin/off"]}, None)
     mcp_entry_set_enabled(config_path, "off", False)
-    factory = FactoryRecorder()
-    hub = _hub(config_path, workspace, factory)
-    asyncio.run(hub.reconcile_all())
+    hub = _hub(config_path, workspace, FactoryRecorder())
+    _run(hub.reconcile_all())
     catalog = ClientCatalog()
 
     hub.publish_catalog(catalog)
 
-    servers = {server["alias"]: server for server in catalog.snapshot.servers_view()}
-    assert servers["one"]["catalog_available"] is True
-    assert servers["off"]["catalog_available"] is False
-    assert servers["off"]["runtime_state"] == "disabled"
-    tools = catalog.snapshot.tools_view("one")
-    assert tools == [{"name": "ping", "description": "synthetic ping"}]
-    with pytest.raises(Exception):
-        catalog.snapshot.tools_view("off")
+    one, off = catalog.records["one"], catalog.records["off"]
+    assert one.catalog_available is True
+    assert [d.name for d in one.exposed()] == ["ping"]
+    assert off.catalog_available is False
+    assert off.runtime_state == "disabled"
+    assert off.error == {"code": "alias_disabled", "message": "the alias is disabled"}
+    assert off.exposed() == ()
 
 
 def test_publish_catalog_marks_spawn_failure_unavailable_with_safe_error(
@@ -539,61 +544,36 @@ def test_publish_catalog_marks_spawn_failure_unavailable_with_safe_error(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     mcp_entry_add(config_path, "broken", {"command": ["/bin/broken"]}, None)
-    factory = FactoryRecorder(fail_aliases={"broken"})
-    hub = _hub(config_path, workspace, factory, attempts=3)
-    asyncio.run(hub.reconcile_all())
+    hub = _hub(config_path, workspace, FactoryRecorder(fail_aliases={"broken"}), attempts=3)
+    _run(hub.reconcile_all())
     catalog = ClientCatalog()
 
     hub.publish_catalog(catalog)
 
-    servers = catalog.snapshot.servers_view()
-    assert servers[0]["catalog_available"] is False
-    assert servers[0]["last_error"] is not None
-    assert servers[0]["last_error"]["code"] == "spawn_failed"
+    broken = catalog.records["broken"]
+    assert broken.runtime_state == "unavailable"
+    assert broken.catalog_available is False
+    assert broken.error is not None
+    assert broken.error["code"] in {"spawn_failed", "startup_budget_exhausted"}
 
 
-def test_publish_catalog_revision_is_stable_without_changes(
-    tmp_path: Path,
-) -> None:
+def test_bounce_replaces_the_route(tmp_path: Path) -> None:
     config_path = _client_yaml(tmp_path / "config.yaml")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     mcp_entry_add(config_path, "one", {"command": ["/bin/one"]}, None)
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
     catalog = ClientCatalog()
     hub.publish_catalog(catalog)
-    first = catalog.revision
-
-    # Identical republication (no effective change) keeps the revision.
-    hub.publish_catalog(catalog)
-
-    assert catalog.revision == first
-
-
-def test_bounce_replaces_the_route_and_bumps_the_revision(
-    tmp_path: Path,
-) -> None:
-    config_path = _client_yaml(tmp_path / "config.yaml")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    mcp_entry_add(config_path, "one", {"command": ["/bin/one"]}, None)
-    factory = FactoryRecorder()
-    hub = _hub(config_path, workspace, factory)
-    asyncio.run(hub.reconcile_all())
-    catalog = ClientCatalog()
-    hub.publish_catalog(catalog)
-    first_revision = catalog.revision
-    old_provider = catalog.snapshot.route("one", "ping")[1]
+    old_provider = catalog.route("one", "ping")
 
     config.mcp_entry_replace(config_path, "one", {"command": ["/bin/one-v2"]}, None)
-    asyncio.run(hub.reconcile_alias("one"))
+    _run(hub.reconcile_alias("one"))
     hub.publish_catalog(catalog)
 
-    assert catalog.revision != first_revision
-    new_provider = catalog.snapshot.route("one", "ping")[1]
-    assert new_provider is not old_provider
+    assert catalog.route("one", "ping") is not old_provider
     assert factory.for_alias("one")[0].closed
 
 
@@ -604,14 +584,14 @@ def test_remove_alias_drops_it_from_the_catalog(tmp_path: Path) -> None:
     mcp_entry_add(config_path, "one", {"command": ["/bin/one"]}, None)
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
     catalog = ClientCatalog()
     hub.publish_catalog(catalog)
 
-    asyncio.run(hub.forget("one"))
+    _run(hub.forget("one"))
     hub.publish_catalog(catalog)
 
-    assert catalog.snapshot.servers_view() == []
+    assert dict(catalog.records) == {}
 
 
 def test_publish_catalog_snapshot_is_pure_client_side_discovery(
@@ -624,13 +604,13 @@ def test_publish_catalog_snapshot_is_pure_client_side_discovery(
     mcp_entry_add(config_path, "one", {"command": ["/bin/one"]}, None)
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
     catalog = ClientCatalog()
     hub.publish_catalog(catalog)
     baseline = factory.for_alias("one")[0].calls
 
-    catalog.snapshot.route("one", "ping")  # route lookup: no spawn, no read
-    catalog.snapshot.servers_view()
+    catalog.route("one", "ping")  # route lookup: no spawn, no read
+    catalog.build(max_bytes=1_000_000)
 
     assert len(factory.launches) == 1  # no implicit spawn
     assert factory.for_alias("one")[0].calls == baseline
@@ -644,7 +624,7 @@ def test_alias_record_shapes_the_catalog_entry(tmp_path: Path) -> None:
     mcp_entry_add(config_path, "one", {"command": ["/bin/one"]}, None)
     factory = FactoryRecorder()
     hub = _hub(config_path, workspace, factory)
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
 
     record = hub.alias_record("one")
 
@@ -654,12 +634,12 @@ def test_alias_record_shapes_the_catalog_entry(tmp_path: Path) -> None:
     assert record.runtime_state == "running"
     assert record.transport == "stdio"
     assert record.catalog_available is True
-    assert record.discovery_error is None
+    assert record.error is None
     assert [descriptor.name for descriptor in record.descriptors] == ["ping"]
 
 
 # --------------------------------------------------------------------------
-# Step 7A: per-alias global startup budget (120 s in production; short
+# Per-alias global startup budget (120 s in production; short
 # injected budgets here — never a real 120 s wait in tests).
 # --------------------------------------------------------------------------
 
@@ -718,7 +698,7 @@ def test_slow_startup_succeeds_within_budget_on_retry(tmp_path: Path) -> None:
     factory = BudgetFactory([FakeTransport(fail=True), DelayedTransport(delay=0.3)])
     hub = _budget_hub(config_path, workspace, factory, budget=2.0)
 
-    statuses = asyncio.run(hub.reconcile_all())
+    statuses = _run(hub.reconcile_all())
 
     assert statuses["slow"].state is AliasState.RUNNING
     assert len(factory.launches) == 2
@@ -740,7 +720,7 @@ def test_startup_budget_is_shared_across_attempts_and_never_rearmed(
     )
     hub = _budget_hub(config_path, workspace, factory, budget=1.0)
 
-    statuses = asyncio.run(hub.reconcile_all())
+    statuses = _run(hub.reconcile_all())
 
     assert statuses["slow"].state is AliasState.UNAVAILABLE
     assert len(factory.launches) == 3
@@ -765,14 +745,14 @@ def test_budget_exhausted_alias_does_not_respawn_without_explicit_operation(
     )
     hub = _budget_hub(config_path, workspace, factory, budget=1.0)
 
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
     first_count = len(factory.launches)
     assert first_count == 3
     assert hub.state_of("slow") is AliasState.UNAVAILABLE
 
     # Reconciling an unchanged configuration must never re-spawn.
-    asyncio.run(hub.reconcile_alias("slow"))
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_alias("slow"))
+    _run(hub.reconcile_all())
     assert len(factory.launches) == first_count
     assert hub.state_of("slow") is AliasState.UNAVAILABLE
 
@@ -787,13 +767,13 @@ def test_quick_failures_exhaust_attempts_with_spawn_failed_then_stay_down(
     factory = BudgetFactory([FakeTransport(fail=True) for _ in range(6)])
     hub = _budget_hub(config_path, workspace, factory, budget=1.0)
 
-    statuses = asyncio.run(hub.reconcile_all())
+    statuses = _run(hub.reconcile_all())
 
     assert statuses["broken"].state is AliasState.UNAVAILABLE
     assert len(factory.launches) == 3
     assert statuses["broken"].last_error is not None
     assert statuses["broken"].last_error["code"] == "spawn_failed"
-    asyncio.run(hub.reconcile_alias("broken"))
+    _run(hub.reconcile_alias("broken"))
     assert len(factory.launches) == 3
 
 
@@ -809,13 +789,13 @@ def test_explicit_config_change_spawns_again_after_budget_exhaustion(
     )
     hub = _budget_hub(config_path, workspace, factory, budget=1.0)
 
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
     assert hub.state_of("slow") is AliasState.UNAVAILABLE
     first_count = len(factory.launches)
 
     mcp_entry_replace(config_path, "slow", {"command": ["/bin/slow-v2"]}, None)
     factory._pending = [DelayedTransport(delay=0.0)]
-    statuses = asyncio.run(hub.reconcile_all())
+    statuses = _run(hub.reconcile_all())
 
     assert len(factory.launches) > first_count
     assert statuses["slow"].state is AliasState.RUNNING
@@ -836,7 +816,7 @@ def test_cancelled_slow_startup_cleans_up_the_transport(tmp_path: Path) -> None:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    asyncio.run(scenario())
+    _run(scenario())
 
     assert factory.handed[0].closed is True
     assert hub.state_of("slow") is AliasState.UNAVAILABLE
@@ -852,7 +832,7 @@ def test_running_provider_keeps_the_ordinary_call_timeout(tmp_path: Path) -> Non
     factory = BudgetFactory([DelayedTransport(delay=0.0)])
     hub = _budget_hub(config_path, workspace, factory, budget=2.0)
 
-    asyncio.run(hub.reconcile_all())
+    _run(hub.reconcile_all())
 
     provider = hub.provider_clients()["slow"]
     assert isinstance(provider, McpProviderToolClient)
@@ -861,7 +841,7 @@ def test_running_provider_keeps_the_ordinary_call_timeout(tmp_path: Path) -> Non
 
 
 # --------------------------------------------------------------------------
-# Step 7B: decoupled startup. The control-channel connection and heartbeat
+# Decoupled startup. The control-channel connection and heartbeat
 # start independently of the (possibly long) initial MCP reconciliation,
 # STARTING is observable, and the catalog is re-published on every state
 # change. Short injected delays here — never a real 120 s wait in tests.
@@ -898,7 +878,7 @@ def test_other_alias_stays_invocable_during_slow_startup(tmp_path: Path) -> None
         await asyncio.wait_for(task, timeout=5)
         assert hub.state_of("zzz") is AliasState.RUNNING
 
-    asyncio.run(scenario())
+    _run(scenario())
 
 
 def test_catalog_publication_observes_starting_then_terminal_states(
@@ -935,7 +915,7 @@ def test_catalog_publication_observes_starting_then_terminal_states(
 
     hub.bind_on_change(observe)
 
-    statuses = asyncio.run(hub.reconcile_all())
+    statuses = _run(hub.reconcile_all())
 
     assert statuses["good"].state is AliasState.RUNNING
     assert statuses["bad"].state is AliasState.UNAVAILABLE
@@ -945,10 +925,10 @@ def test_catalog_publication_observes_starting_then_terminal_states(
     assert states["good"][-1] == "running"
     assert states["bad"][0] == "starting"
     assert states["bad"][-1] == "unavailable"
-    good = catalog._records["good"]
+    good = catalog.records["good"]
     assert good.runtime_state == "running"
     assert good.catalog_available is True
-    bad = catalog._records["bad"]
+    bad = catalog.records["bad"]
     assert bad.runtime_state == "unavailable"
     assert bad.catalog_available is False
 
@@ -975,57 +955,89 @@ def test_starting_alias_record_reports_starting_not_spawn_failed(
         assert record.runtime_state == "starting"
         assert record.enabled is True
         assert record.catalog_available is False
-        assert record.discovery_error is not None
-        assert record.discovery_error["code"] == "alias_starting"
+        assert record.error is not None
+        assert record.error["code"] == "alias_starting"
         await asyncio.wait_for(task, timeout=5)
 
-    asyncio.run(scenario())
+    _run(scenario())
 
 
 def test_running_alias_with_invalidated_inventory_publishes_unavailable(
     tmp_path: Path,
 ) -> None:
-    """A RUNNING alias whose inventory was invalidated is not available.
-
-    The process is still running, but its catalog record must refuse
-    discovery (no empty, misleading tool list) while every other alias
-    stays isolated. The revision moves only on this effective change and
-    returns to availability after a successful bounded reread.
-    """
+    """Between an upstream change and a good re-read, the alias publishes
+    nothing rather than a stale list; other aliases stay available."""
     config_path = _client_yaml(tmp_path / "config.yaml")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     mcp_entry_add(config_path, "one", {"command": ["/bin/one"]}, None)
     mcp_entry_add(config_path, "two", {"command": ["/bin/two"]}, None)
-    factory = FactoryRecorder()
-    hub = _hub(config_path, workspace, factory)
-    asyncio.run(hub.reconcile_all())
+    hub = _hub(config_path, workspace, FactoryRecorder())
+    _run(hub.reconcile_all())
     catalog = ClientCatalog()
-    hub.publish_catalog(catalog)
-    before = catalog.revision
-    assert catalog.snapshot.servers_view()[0]["catalog_available"] is True
 
     provider = hub.provider_clients()["one"]
     provider.invalidate_inventory()
     hub.publish_catalog(catalog)
 
-    record = catalog.snapshot._records["one"]
-    assert record.runtime_state == "running"  # the process still runs
-    assert record.catalog_available is False  # but the catalog refuses
-    assert record.discovery_error is not None
-    assert record.discovery_error["code"] == "inventory_stale"
-    assert catalog.revision != before  # effective change: revision moved
-    with pytest.raises(Exception):
-        catalog.snapshot.tools_view("one")
-    # Other aliases stay isolated and available.
-    other = catalog.snapshot._records["two"]
-    assert other.catalog_available is True
-    assert catalog.snapshot.tools_view("two") != []
+    record = catalog.records["one"]
+    assert record.runtime_state == "running"
+    assert record.catalog_available is False
+    assert record.error is not None and record.error["code"] == "inventory_stale"
+    assert catalog.records["two"].catalog_available is True
 
-    # A successful bounded reread restores availability honestly.
-    asyncio.run(provider.list_tools())
+    _run(provider.list_tools())
     hub.publish_catalog(catalog)
-    restored = catalog.snapshot._records["one"]
-    assert restored.catalog_available is True
-    assert restored.discovery_error is None
-    assert catalog.revision != before
+    assert catalog.records["one"].catalog_available is True
+    assert catalog.records["one"].error is None
+
+
+def test_upstream_tools_changed_triggers_one_refresh_and_change_notices(
+    tmp_path: Path,
+) -> None:
+    config_path = _client_yaml(tmp_path / "config.yaml")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    mcp_entry_add(config_path, "one", {"command": ["/bin/one"]}, None)
+    factory = FactoryRecorder()
+    hub = _hub(config_path, workspace, factory)
+    _run(hub.reconcile_all())
+    changes: list[str] = []
+    hub.bind_on_change(lambda: changes.append(hub.alias_record("one").error and "stale" or "fresh"))
+    transport = factory.for_alias("one")[0]
+    reads = transport.calls
+
+    async def notify() -> None:
+        await transport.on_tools_changed()
+        await transport.on_tools_changed()  # coalesced with the first
+        for _ in range(100):
+            if changes and changes[-1] == "fresh":
+                return
+            await asyncio.sleep(0.01)
+
+    _run(notify())
+    assert changes[0] == "stale" and changes[-1] == "fresh"
+    assert transport.calls == reads + 1
+
+
+def test_a_dead_provider_makes_its_alias_unavailable(tmp_path: Path) -> None:
+    config_path = _client_yaml(tmp_path / "config.yaml")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    mcp_entry_add(config_path, "one", {"command": ["/bin/one"]}, None)
+    hub = _hub(config_path, workspace, FactoryRecorder())
+    _run(hub.reconcile_all())
+    changes: list[str] = []
+    hub.bind_on_change(lambda: changes.append(hub.state_of("one").value))
+
+    async def die() -> None:
+        hub.provider_clients()["one"]._mark_unavailable()
+        for _ in range(100):
+            if changes:
+                return
+            await asyncio.sleep(0.01)
+
+    _run(die())
+    assert hub.state_of("one") is AliasState.UNAVAILABLE
+    assert hub.alias_record("one").error["code"] == "alias_unavailable"
+    _run(hub.aclose())

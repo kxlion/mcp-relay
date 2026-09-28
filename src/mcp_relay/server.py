@@ -9,8 +9,7 @@ Two explicit listener apps share one ``RelayRegistry``:
 
 :func:`_create_listener_apps` builds the registry once and hands the SAME
 instance to both factories. Runtime startup serves those apps on independently
-reserved sockets; :func:`create_app` keeps the former composite shape only for
-in-process compatibility.
+reserved sockets.
 """
 
 from __future__ import annotations
@@ -390,7 +389,7 @@ class RelaySettings(BaseModel):
 def create_mcp_app(registry: RelayRegistry, *, settings: RelaySettings) -> FastAPI:
     """Create the MCP listener app: /mcp and MCP authentication only.
 
-    The app owns the fixed facade and, through its lifespan, the MCP session
+    The app owns the MCP facade and, through its lifespan, the MCP session
     manager for this listener. It serves no WebSocket route and publishes no
     docs or OpenAPI.
     """
@@ -448,48 +447,6 @@ def _create_listener_apps(settings: RelaySettings) -> tuple[FastAPI, FastAPI]:
         max_ws_message_bytes=settings.max_ws_message_bytes,
     )
     return mcp_app, ws_app
-
-
-def create_app(settings: RelaySettings) -> FastAPI:
-    """Create the compatibility composite app from both listener factories.
-
-    Runtime startup serves the two apps independently. This composite remains
-    for historical in-process tests and callers that still need one ASGI app.
-    """
-    mcp_app, ws_app = _create_listener_apps(settings)
-    registry = mcp_app.state.registry
-
-    @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        # Single owner of the MCP session manager and global shutdown: the
-        # composite runs the MCP app's lifespan exactly once (Starlette
-        # mounts never propagate lifespan events).
-        async with mcp_app.router.lifespan_context(mcp_app):
-            yield
-
-    app = FastAPI(
-        lifespan=lifespan,
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
-    )
-    app.state.registry = registry
-    app.state.settings = settings
-    app.state.mcp = mcp_app.state.mcp
-    app.state.mcp_app = mcp_app
-    app.state.ws_app = ws_app
-
-    # Transitional mounting (Step 5): forward the WS app's socket route into
-    # this composite so /ws keeps priority over the catch-all MCP mount
-    # below. The forwarded route never matches HTTP scopes, and the MCP app
-    # itself serves no /ws route.
-    for route in ws_app.router.routes:
-        if getattr(route, "path", None) == "/ws":
-            app.router.routes.append(route)
-            break
-
-    app.mount("/", mcp_app)
-    return app
 
 
 class ListenerBindError(RuntimeError):

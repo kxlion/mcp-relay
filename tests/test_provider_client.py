@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import pytest
 
@@ -30,7 +30,6 @@ from mcp_relay.providers.base import (
     UnknownProviderToolError,
     validate_provider_arguments,
 )
-from mcp_relay.providers.in_process import InProcessProviderToolClient
 from mcp_relay.providers.mcp_client import (
     McpProviderToolClient,
     _schema_failure_category,
@@ -209,118 +208,6 @@ def test_provider_arguments_absent_additional_properties_defaults_to_open() -> N
 
     arguments: dict[str, JsonValue] = {"valid_upstream_key": "value", "extra": True}
     assert validate_provider_arguments(descriptor, arguments) == arguments
-
-
-def test_in_process_passes_json_arguments_without_semantic_conversion() -> None:
-    async def scenario() -> None:
-        received: Mapping[str, JsonValue] | None = None
-
-        async def handler(arguments: Mapping[str, JsonValue]) -> ProviderToolResult:
-            nonlocal received
-            received = arguments
-            return result()
-
-        arguments: dict[str, JsonValue] = {
-            "nested": [1, True, None, {"native": "value"}]
-        }
-        client = InProcessProviderToolClient([descriptor()], {"snapshot": handler})
-        assert await client.call_tool("snapshot", arguments) == result()
-        assert received is arguments
-
-    asyncio.run(scenario())
-
-
-def test_unknown_in_process_tool_is_rejected_before_handler_execution() -> None:
-    async def scenario() -> None:
-        calls = 0
-
-        async def handler(arguments: Mapping[str, JsonValue]) -> ProviderToolResult:
-            nonlocal calls
-            calls += 1
-            return result()
-
-        client = InProcessProviderToolClient([descriptor()], {"snapshot": handler})
-        with pytest.raises(UnknownProviderToolError, match="unknown provider tool"):
-            await client.call_tool("missing", {})
-        assert calls == 0
-
-    asyncio.run(scenario())
-
-
-def test_in_process_result_and_arguments_are_bounded() -> None:
-    async def scenario() -> None:
-        async def handler(arguments: Mapping[str, JsonValue]) -> dict[str, Any]:
-            return {"content": [{"type": "text", "text": "x" * (MAX_TOOL_RESULT_BYTES + 1)}]}
-
-        client = InProcessProviderToolClient([descriptor()], {"snapshot": handler})
-        with pytest.raises(ProviderResultTooLargeError):
-            await client.call_tool("snapshot", {})
-        with pytest.raises(ProviderToolError) as invalid_arguments:
-            await client.call_tool("snapshot", {"value": object()})  # type: ignore[dict-item]
-        assert_bounded_real_detail(invalid_arguments.value, "invalid provider arguments")
-
-    asyncio.run(scenario())
-
-
-def test_timeout_is_normalized_and_cancellation_is_preserved() -> None:
-    async def scenario() -> None:
-        blocker = asyncio.Event()
-
-        async def handler(arguments: Mapping[str, JsonValue]) -> ProviderToolResult:
-            await blocker.wait()
-            return result()
-
-        client = InProcessProviderToolClient(
-            [descriptor()], {"snapshot": handler}, timeout_seconds=0.01
-        )
-        with pytest.raises(ProviderToolError) as timed_out:
-            await client.call_tool("snapshot", {})
-        assert_bounded_real_detail(timed_out.value, "provider operation timed out")
-        await asyncio.wait_for(client.wait_unavailable(), 1)
-        with pytest.raises(ProviderToolError, match="provider client unavailable"):
-            await client.call_tool("snapshot", {})
-
-        cancellation_client = InProcessProviderToolClient(
-            [descriptor()], {"snapshot": handler}, timeout_seconds=1
-        )
-        task = asyncio.create_task(cancellation_client.call_tool("snapshot", {}))
-        await asyncio.sleep(0)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        with pytest.raises(ProviderToolError, match="provider client unavailable"):
-            await cancellation_client.call_tool("snapshot", {})
-
-    asyncio.run(scenario())
-
-
-def test_in_process_timeout_cannot_be_suppressed_into_success() -> None:
-    async def scenario() -> None:
-        cancelled = asyncio.Event()
-        release = asyncio.Event()
-
-        async def handler(arguments: Mapping[str, JsonValue]) -> ProviderToolResult:
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                cancelled.set()
-                await release.wait()
-                return result("late secret password very-secret")
-
-        client = InProcessProviderToolClient(
-            [descriptor()], {"snapshot": handler}, timeout_seconds=0.01
-        )
-        loop = asyncio.get_running_loop()
-        started = loop.time()
-        with pytest.raises(ProviderToolError) as caught:
-            await client.call_tool("snapshot", {})
-        assert loop.time() - started < 0.05
-        assert_bounded_real_detail(caught.value, "provider operation timed out")
-        await cancelled.wait()
-        release.set()
-        await asyncio.sleep(0)
-
-    asyncio.run(scenario())
 
 
 def test_mcp_inventory_timeout_cannot_be_suppressed_into_success() -> None:
@@ -726,9 +613,6 @@ def test_mcp_connection_failure_message_includes_root_cause_detail() -> None:
             "call", "OSError", ProviderConnectionError, "provider connection failed (OSError: wss://user:password@host/?token=very-secret)", id="mcp-call-connection"
         ),
         pytest.param(
-            "in_process", "ProviderToolError", ProviderToolError, "provider tool call failed (ProviderToolError: wss://user:password@host/?token=very-secret)", id="in-process-tool"
-        ),
-        pytest.param(
             "list", "ProviderToolError", ProviderConnectionError, "provider connection failed (ProviderToolError: wss://user:password@host/?token=very-secret)", id="mcp-list-tool"
         ),
         pytest.param(
@@ -758,22 +642,14 @@ def test_provider_errors_carry_bounded_real_detail_per_path(
             raise OSError(secret_url) if error_kind == "OSError" else ProviderToolError(secret_url)
 
     async def scenario() -> None:
-        if path == "in_process":
-            async def handler(arguments: Mapping[str, JsonValue]) -> ProviderToolResult:
-                raise ProviderToolError(secret_url)
-
-            client = InProcessProviderToolClient([descriptor()], {"snapshot": handler})
-            with pytest.raises(ProviderToolError) as caught:
-                await client.call_tool("snapshot", {})
-        else:
-            client = McpProviderToolClient(BrokenTransport(), provider_name="cua-driver")
-            if path == "call":
-                # Prime the inventory so the call path exercises a genuine
-                # post-send failure, not the pre-send reread refusal.
-                await client.list_tools()
-            operation = client.list_tools() if path == "list" else client.call_tool("capture", {})
-            with pytest.raises(expected_error) as caught:
-                await operation
+        client = McpProviderToolClient(BrokenTransport(), provider_name="cua-driver")
+        if path == "call":
+            # Prime the inventory so the call path exercises a genuine
+            # post-send failure, not the pre-send reread refusal.
+            await client.list_tools()
+        operation = client.list_tools() if path == "list" else client.call_tool("capture", {})
+        with pytest.raises(expected_error) as caught:
+            await operation
         assert_bounded_real_detail(caught.value, expected_message)
 
     asyncio.run(scenario())
@@ -1058,19 +934,12 @@ def test_successful_close_is_idempotent() -> None:
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("client_kind", ["in_process", "mcp"])
-def test_successful_close_rejects_later_operations(client_kind: str) -> None:
+def test_successful_close_rejects_later_operations() -> None:
     async def scenario() -> None:
-        if client_kind == "in_process":
-            client = InProcessProviderToolClient(
-                [descriptor()], {"snapshot": lambda arguments: _async_result()}
-            )
-            tool_name = "snapshot"
-        else:
-            client = McpProviderToolClient(
-                FakeMcpTransport(), provider_name="cua-driver"
-            )
-            tool_name = "capture"
+        client = McpProviderToolClient(
+            FakeMcpTransport(), provider_name="cua-driver"
+        )
+        tool_name = "capture"
         await client.close()
         for operation in (client.list_tools(), client.call_tool(tool_name, {})):
             with pytest.raises(ProviderToolError) as caught:
@@ -1083,10 +952,9 @@ def test_successful_close_rejects_later_operations(client_kind: str) -> None:
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("client_kind", ["in_process", "mcp"])
 @pytest.mark.parametrize("first_outcome", ["cancel", "failure", "timeout"])
 def test_close_can_retry_after_cancelled_or_failed_cleanup(
-    client_kind: str, first_outcome: str
+    first_outcome: str
 ) -> None:
     async def scenario() -> None:
         attempts = 0
@@ -1103,20 +971,13 @@ def test_close_can_retry_after_cancelled_or_failed_cleanup(
             if attempts == 1:
                 raise RuntimeError("synthetic cleanup failure")
 
-        if client_kind == "in_process":
-            client = InProcessProviderToolClient(
-                [descriptor()], {"snapshot": lambda arguments: _async_result()},
-                close_handler=cleanup,
-                close_timeout_seconds=0.01,
-            )
-        else:
-            transport = FakeMcpTransport()
-            transport.close = cleanup  # type: ignore[method-assign]
-            client = McpProviderToolClient(
-                transport,
-                provider_name="cua-driver",
-                close_timeout_seconds=0.01,
-            )
+        transport = FakeMcpTransport()
+        transport.close = cleanup  # type: ignore[method-assign]
+        client = McpProviderToolClient(
+            transport,
+            provider_name="cua-driver",
+            close_timeout_seconds=0.01,
+        )
 
         if first_outcome == "cancel":
             task = asyncio.create_task(client.close())
@@ -1139,8 +1000,7 @@ def test_close_can_retry_after_cancelled_or_failed_cleanup(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("client_kind", ["in_process", "mcp"])
-def test_close_does_not_overlap_uncooperative_cleanup(client_kind: str) -> None:
+def test_close_does_not_overlap_uncooperative_cleanup() -> None:
     async def scenario() -> None:
         attempts = 0
         cancelled = asyncio.Event()
@@ -1156,20 +1016,13 @@ def test_close_does_not_overlap_uncooperative_cleanup(client_kind: str) -> None:
                     except asyncio.CancelledError:
                         cancelled.set()
 
-        if client_kind == "in_process":
-            client = InProcessProviderToolClient(
-                [descriptor()], {"snapshot": lambda arguments: _async_result()},
-                close_handler=cleanup,
-                close_timeout_seconds=0.01,
-            )
-        else:
-            transport = FakeMcpTransport()
-            transport.close = cleanup  # type: ignore[method-assign]
-            client = McpProviderToolClient(
-                transport,
-                provider_name="cua-driver",
-                close_timeout_seconds=0.01,
-            )
+        transport = FakeMcpTransport()
+        transport.close = cleanup  # type: ignore[method-assign]
+        client = McpProviderToolClient(
+            transport,
+            provider_name="cua-driver",
+            close_timeout_seconds=0.01,
+        )
 
         with pytest.raises(ProviderCleanupError) as first:
             await client.close()
@@ -1196,9 +1049,7 @@ def test_close_does_not_overlap_uncooperative_cleanup(client_kind: str) -> None:
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("client_kind", ["in_process", "mcp"])
 def test_close_waits_for_uncooperative_provider_operation_before_cleanup(
-    client_kind: str,
 ) -> None:
     async def scenario() -> None:
         operation_cancelled = asyncio.Event()
@@ -1217,29 +1068,20 @@ def test_close_waits_for_uncooperative_provider_operation_before_cleanup(
             nonlocal cleanup_attempts
             cleanup_attempts += 1
 
-        if client_kind == "in_process":
-            client = InProcessProviderToolClient(
-                [descriptor()], {"snapshot": lambda arguments: operation()},
-                close_handler=cleanup,
-                timeout_seconds=0.01,
-                close_timeout_seconds=0.01,
-            )
-            invoke = client.call_tool("snapshot", {})
-        else:
-            transport = FakeMcpTransport()
+        transport = FakeMcpTransport()
 
-            async def list_tools(cursor: str | None = None) -> object:
-                return await operation()
+        async def list_tools(cursor: str | None = None) -> object:
+            return await operation()
 
-            transport.list_tools = list_tools  # type: ignore[method-assign]
-            transport.close = cleanup  # type: ignore[method-assign]
-            client = McpProviderToolClient(
-                transport,
-                provider_name="cua-driver",
-                timeout_seconds=0.01,
-                close_timeout_seconds=0.01,
-            )
-            invoke = client.list_tools()
+        transport.list_tools = list_tools  # type: ignore[method-assign]
+        transport.close = cleanup  # type: ignore[method-assign]
+        client = McpProviderToolClient(
+            transport,
+            provider_name="cua-driver",
+            timeout_seconds=0.01,
+            close_timeout_seconds=0.01,
+        )
+        invoke = client.list_tools()
 
         with pytest.raises(ProviderToolError) as timed_out:
             await invoke
@@ -1294,36 +1136,6 @@ class _CongestedClockTransport(FakeMcpTransport):
         # timeout, yet the loop clock has already passed the deadline.
         self.clock["t"] += 2.0
         return response
-
-
-def test_notification_hook_binding_invalidates_without_manual_calls() -> None:
-    """Production wiring: the transport hook, not a test manual call.
-
-    ``bind_transport_notifications`` connects the transport's
-    ``tools/list_changed`` signal to the provider invalidation; the next
-    bounded read then re-reads upstream instead of serving cache.
-    """
-    async def scenario() -> None:
-        transport = _ChangeNotifyingTransport()
-        client = McpProviderToolClient(transport, provider_name="probe")
-        client.bind_transport_notifications()
-        first = await client.list_tools()
-        assert [tool.name for tool in first] == ["capture"]
-        assert transport.reads == 1
-
-        # The upstream server signals a change (no test calls invalidate()).
-        hook = transport.on_tools_changed
-        assert hook is not None
-        await hook()
-        assert not client.inventory_valid
-
-        # The reread hits the transport again and restores executability.
-        second = await client.list_tools()
-        assert [tool.name for tool in second] == ["capture"]
-        assert client.inventory_valid
-        assert transport.reads == 2
-
-    asyncio.run(scenario())
 
 
 def test_notification_invalidates_inventory_and_forces_bounded_reread() -> None:
@@ -1461,7 +1273,7 @@ def test_failed_reread_after_notification_reports_unavailable_inventory() -> Non
 
 
 # --------------------------------------------------------------------------
-# Step 7A: the startup-budget inventory override bounds one call only; the
+# The startup-budget inventory override bounds one call only; the
 # ordinary client deadline (30 s in production) stays untouched.
 # --------------------------------------------------------------------------
 

@@ -14,6 +14,8 @@ from .protocol import (
     RELAY_CONTRACT,
     Cancel,
     Capabilities,
+    Catalog,
+    CatalogTool,
     ClientError,
     ClientResult,
     InvokeMessage,
@@ -63,17 +65,11 @@ class LateResponseError(RelayError):
     """An client replied after its invocation had already completed."""
 
 
-class UnsupportedToolError(RelayError):
-    pass
-
-
 #: Public hook for WS-tunnel progress frames: an async callable receiving the
 #: in-flight relay request_id, the bounded progress value and its message.
 ProgressListener = Callable[[str, int, str], Any]
-
-
-class InvalidToolArgumentsError(UnsupportedToolError):
-    pass
+#: Called (synchronously) whenever the published tool surface may have changed.
+SurfaceListener = Callable[[], None]
 
 
 class RemoteClientError(RelayError):
@@ -93,7 +89,8 @@ class RemoteClientError(RelayError):
 class _Client:
     socket: JsonSocket
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    capabilities: set[str] = field(default_factory=set)
+    admin: bool = False
+    catalog: dict[str, CatalogTool] = field(default_factory=dict)
     last_heartbeat: float = field(default_factory=time.monotonic)
     progress_request_id: str | None = None
     progress: int | None = None
@@ -108,7 +105,7 @@ class ClientStatusSnapshot:
 
     client_id: str | None
     connected: bool
-    capabilities: tuple[str, ...]
+    admin: bool
     invocation_state: str
     progress: int | None
     heartbeat_age_seconds: float | None
@@ -117,12 +114,7 @@ class ClientStatusSnapshot:
     connected_since: float | None = None
     last_disconnect_at: float | None = None
     last_disconnect_reason: str | None = None
-    # Fixed-surface counters: ``public_tools`` counts the tools actually
-    # registered by the Server facade; ``client_operations`` counts the Relay
-    # operations announced by the connected Client (zero without a Client).
-    # Third-party tool counts are deliberately not claimed here.
-    public_tools: int = 0
-    client_operations: int = 0
+    published_tools: int = 0
 
 
 class RelayRegistry:
@@ -157,13 +149,10 @@ class RelayRegistry:
         self._connected_since: float | None = None
         self._last_disconnect_at: float | None = None
         self._last_disconnect_reason: str | None = None
-        # Number of public tools actually registered by the Server facade
-        # (set by the facade after static registration); the registry claims
-        # nothing about third-party tool counts.
-        self._public_tools_count: int = 0
-        # Optional progress listener wired by the MCP facade so WS progress
-        # frames reach the calling MCP client's context.
+        # Wired by the MCP facade: progress frames reach the calling MCP
+        # context, surface changes reach every open MCP session.
         self._progress_listener: ProgressListener | None = None
+        self._surface_listener: SurfaceListener | None = None
 
     @property
     def pending_count(self) -> int:
@@ -179,14 +168,27 @@ class RelayRegistry:
         return self._client.last_heartbeat if self._client is not None else None
 
     @property
-    def announced_capabilities(self) -> frozenset[str]:
-        """Return the current Client announcement for synchronous MCP filtering."""
+    def client_admin(self) -> bool:
+        """Whether the connected Client allows the admin verbs."""
         client = self._client
-        return frozenset(client.capabilities) if client is not None else frozenset()
+        return client is not None and client.admin
 
-    def set_public_tools_count(self, count: int) -> None:
-        """Record how many public tools the Server facade actually registered."""
-        self._public_tools_count = max(0, int(count))
+    @property
+    def catalog(self) -> tuple[CatalogTool, ...]:
+        """Third-party tools of the connected Client; empty when offline."""
+        client = self._client
+        return () if client is None else tuple(client.catalog.values())
+
+    def catalog_tool(self, name: str) -> CatalogTool | None:
+        client = self._client
+        return None if client is None else client.catalog.get(name)
+
+    def set_surface_listener(self, listener: SurfaceListener | None) -> None:
+        self._surface_listener = listener
+
+    def _surface_changed(self) -> None:
+        if self._surface_listener is not None:
+            self._surface_listener()
 
     def set_progress_listener(self, listener: ProgressListener | None) -> None:
         """Register (or clear) the async listener for in-flight progress."""
@@ -200,7 +202,7 @@ class RelayRegistry:
                 return ClientStatusSnapshot(
                     client_id=self._client_id,
                     connected=False,
-                    capabilities=(),
+                    admin=False,
                     invocation_state="idle",
                     progress=None,
                     heartbeat_age_seconds=None,
@@ -208,14 +210,12 @@ class RelayRegistry:
                     connected_since=None,
                     last_disconnect_at=self._last_disconnect_at,
                     last_disconnect_reason=self._last_disconnect_reason,
-                    public_tools=self._public_tools_count,
-                    client_operations=0,
                 )
             heartbeat_age = max(0.0, time.monotonic() - client.last_heartbeat)
             return ClientStatusSnapshot(
                 client_id=self._client_id,
                 connected=True,
-                capabilities=tuple(sorted(client.capabilities)),
+                admin=client.admin,
                 invocation_state="busy" if self._pending else "idle",
                 progress=client.progress,
                 heartbeat_age_seconds=heartbeat_age,
@@ -223,8 +223,7 @@ class RelayRegistry:
                 connected_since=self._connected_since,
                 last_disconnect_at=self._last_disconnect_at,
                 last_disconnect_reason=self._last_disconnect_reason,
-                public_tools=self._public_tools_count,
-                client_operations=len(client.capabilities),
+                published_tools=len(client.catalog),
             )
 
     @property
@@ -257,8 +256,16 @@ class RelayRegistry:
     async def set_capabilities(self, socket: JsonSocket, message: Capabilities) -> None:
         async with self._lock:
             client = self._require_socket(socket)
-            client.capabilities = set(message.tools)
+            client.admin = message.admin
             client.client_version = message.client_version
+        self._surface_changed()
+
+    async def set_catalog(self, socket: JsonSocket, message: Catalog) -> None:
+        """Replace the connected Client's published tools atomically."""
+        async with self._lock:
+            client = self._require_socket(socket)
+            client.catalog = {tool.name: tool for tool in message.tools}
+        self._surface_changed()
 
     async def send(self, socket: JsonSocket, message: object) -> None:
         """Serialize every server-to-client write for the registered connection."""
@@ -295,8 +302,6 @@ class RelayRegistry:
             if self._pending:
                 raise ClientBusyError("client already has an invocation in progress")
             self._recently_completed.pop(request_id, None)
-            if message.tool_name not in self._client.capabilities:
-                raise UnsupportedToolError(f"tool is not declared: {message.tool_name}")
             future: asyncio.Future[CallToolResult] = (
                 asyncio.get_running_loop().create_future()
             )
@@ -328,9 +333,7 @@ class RelayRegistry:
             await self._finalize_request(request_id, future)
 
     async def handle_result(self, message: ClientResult) -> None:
-        # Tranche 4: the bounded wire mirror becomes the NATIVE MCP result
-        # here, exactly once — downstream consumers (the fixed facade) never
-        # re-convert.
+        # Converted to the native MCP result exactly once, here.
         await self._resolve(
             message.request_id, result=native_result(message.result)
         )
@@ -415,6 +418,7 @@ class RelayRegistry:
                     )
                 self._remember_completed(request_id)
             self._pending.clear()
+        self._surface_changed()
 
     async def _send_cancel_if_connected(
         self, socket: JsonSocket, request_id: str

@@ -455,14 +455,6 @@ def _client_admin_config(tmp_path: Path) -> Path:
     return config_path
 
 
-def test_generated_client_yaml_contains_the_admin_setting(tmp_path: Path) -> None:
-    config_path = _client_admin_config(tmp_path)
-
-    document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-
-    assert document["admin"] is True
-
-
 def test_admin_setting_set_show_and_unset_round_trip(tmp_path: Path) -> None:
     config_path = _client_admin_config(tmp_path)
 

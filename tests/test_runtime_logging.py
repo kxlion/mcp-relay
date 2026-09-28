@@ -394,38 +394,26 @@ def test_mcp_iserror_content_does_not_upgrade_access_to_error(tmp_path: Path) ->
 # ---------------------------------------------------------------------------
 
 
-def _run_client_mcp_command_scenario(tmp_path: Path) -> None:
-    """Run one client mcp.command invocation through a fake socket."""
+def _run_client_mcp_command_scenario(
+    tmp_path: Path, request_id: str = "req-start"
+) -> None:
+    """One mcp.command through a real RelayClient session and a fake socket."""
     import asyncio
     import json
 
     from mcp_relay.client import ClientSettings, RelayClient
     from mcp_relay.mcp_catalog import AliasCatalog, ClientCatalog
     from mcp_relay.output_models import ProviderToolResult
+    from mcp_relay.protocol import RELAY_CONTRACT
     from mcp_relay.provider_tools import ProviderToolDescriptor
 
-    descriptor = ProviderToolDescriptor(
-        provider_name="sample",
-        tool_name="click",
-        description="click",
-        input_schema={"type": "object", "additionalProperties": False},
-    )
-
     class Provider:
-        async def list_tools(self) -> list[ProviderToolDescriptor]:
-            return [descriptor]
-
-        async def call_tool(
-            self, tool_name: str, arguments: object
-        ) -> ProviderToolResult:
+        async def call_tool(self, tool_name: str, arguments: object) -> ProviderToolResult:
             return ProviderToolResult(content=[], structuredContent={"ok": True})
-
-        async def close(self) -> None:
-            return None
 
     class Socket:
         def __init__(self, inbound: list[str]) -> None:
-            self.inbound = asyncio.Queue()
+            self.inbound: asyncio.Queue[str] = asyncio.Queue()
             for item in inbound:
                 self.inbound.put_nowait(item)
             self.sent: list[dict[str, object]] = []
@@ -437,15 +425,6 @@ def _run_client_mcp_command_scenario(tmp_path: Path) -> None:
             return await self.inbound.get()
 
     async def scenario() -> None:
-        client = RelayClient(
-            ClientSettings(
-                server_url="ws://localhost/ws",
-                client_id="d",
-                client_token='client-synthetic-credential-0000000000000000',
-                workspace=tmp_path,
-            ),
-            capabilities=[],
-        )
         catalog = ClientCatalog()
         catalog.update_alias(
             AliasCatalog(
@@ -453,42 +432,47 @@ def _run_client_mcp_command_scenario(tmp_path: Path) -> None:
                 enabled=True,
                 runtime_state="running",
                 transport="stdio",
-                entry={"command": ["/bin/sample"]},
-                last_error=None,
                 catalog_available=True,
-                discovery_error=None,
-                descriptors=(descriptor,),
+                error=None,
+                descriptors=(
+                    ProviderToolDescriptor(
+                        provider_name="sample",
+                        tool_name="click",
+                        description="click",
+                        input_schema={"type": "object"},
+                    ),
+                ),
                 provider=Provider(),
             )
         )
-        client.catalog = catalog
+        client = RelayClient(
+            ClientSettings(
+                server_url="ws://localhost/ws",
+                client_id="d",
+                client_token="client-synthetic-credential-0000000000000000",
+                workspace=tmp_path,
+            ),
+            catalog=catalog,
+        )
         socket = Socket(
             [
-                json.dumps({"version": 1, "type": "registered", "client_id": "d", "server_version": "0.1.0", "relay_contract": 1}),
+                json.dumps({"version": 1, "type": "registered", "client_id": "d", "server_version": "0.1.0", "relay_contract": RELAY_CONTRACT}),
                 json.dumps(
                     {
                         "version": 2,
                         "type": "invoke",
-                        "request_id": "req-start",
+                        "request_id": request_id,
                         "tool_name": "mcp.command",
-                        "arguments": {
-                            "alias": "sample",
-                            "tool": "click",
-                            "arguments": {},
-                            "catalog_revision": catalog.revision,
-                        },
+                        "arguments": {"alias": "sample", "tool": "click", "arguments": {}},
                     }
                 ),
             ]
         )
         task = asyncio.create_task(client.run_session(socket))
-        for _ in range(200):
-            if any(
-                m.get("type") == "result" and m.get("request_id") == "req-start"
-                for m in socket.sent
-            ):
+        for _ in range(500):
+            if any(m.get("type") == "result" and m.get("request_id") == request_id for m in socket.sent):
                 break
-            await asyncio.sleep(0.001)
+            await asyncio.sleep(0.002)
         client.stop()
         await task
         await client.aclose()
@@ -532,105 +516,8 @@ def test_mcp_command_done_event_reaches_each_sink_exactly_once(
     tmp_path: Path,
 ) -> None:
     """The client done event uses the unified format, once per sink."""
-    import asyncio
-    import json
-
-    from mcp_relay.client import ClientSettings, RelayClient
-    from mcp_relay.mcp_catalog import AliasCatalog, ClientCatalog
-    from mcp_relay.output_models import ProviderToolResult
-    from mcp_relay.provider_tools import ProviderToolDescriptor
-
-    descriptor = ProviderToolDescriptor(
-        provider_name="sample",
-        tool_name="click",
-        description="click",
-        input_schema={"type": "object", "additionalProperties": False},
-    )
-
-    class Provider:
-        async def list_tools(self) -> list[ProviderToolDescriptor]:
-            return [descriptor]
-
-        async def call_tool(
-            self, tool_name: str, arguments: object
-        ) -> ProviderToolResult:
-            return ProviderToolResult(content=[], structuredContent={"ok": True})
-
-        async def close(self) -> None:
-            return None
-
-    class Socket:
-        def __init__(self, inbound: list[str]) -> None:
-            self.inbound = asyncio.Queue()
-            for item in inbound:
-                self.inbound.put_nowait(item)
-            self.sent: list[dict[str, object]] = []
-
-        async def send(self, payload: str) -> None:
-            self.sent.append(json.loads(payload))
-
-        async def recv(self) -> str:
-            return await self.inbound.get()
-
-    async def scenario() -> None:
-        client = RelayClient(
-            ClientSettings(
-                server_url="ws://localhost/ws",
-                client_id="d",
-                client_token='client-synthetic-credential-0000000000000000',
-                workspace=tmp_path,
-            ),
-            capabilities=[],
-        )
-        catalog = ClientCatalog()
-        catalog.update_alias(
-            AliasCatalog(
-                alias="sample",
-                enabled=True,
-                runtime_state="running",
-                transport="stdio",
-                entry={"command": ["/bin/sample"]},
-                last_error=None,
-                catalog_available=True,
-                discovery_error=None,
-                descriptors=(descriptor,),
-                provider=Provider(),
-            )
-        )
-        client.catalog = catalog
-        socket = Socket(
-            [
-                json.dumps({"version": 1, "type": "registered", "client_id": "d", "server_version": "0.1.0", "relay_contract": 1}),
-                json.dumps(
-                    {
-                        "version": 2,
-                        "type": "invoke",
-                        "request_id": "req-sink",
-                        "tool_name": "mcp.command",
-                        "arguments": {
-                            "alias": "sample",
-                            "tool": "click",
-                            "arguments": {},
-                            "catalog_revision": catalog.revision,
-                        },
-                    }
-                ),
-            ]
-        )
-        task = asyncio.create_task(client.run_session(socket))
-        for _ in range(200):
-            if any(
-                m.get("type") == "result" and m.get("request_id") == "req-sink"
-                for m in socket.sent
-            ):
-                break
-            await asyncio.sleep(0.001)
-        client.stop()
-        await task
-        await client.aclose()
-
     with _LoggingState(), _applied_logging(tmp_path) as (stderr, log):
-        asyncio.run(scenario())
+        _run_client_mcp_command_scenario(tmp_path, "req-sink")
 
     stderr_lines = [line for line in _lines(stderr.getvalue()) if "mcp.command done" in line]
     file_lines = [line for line in _lines(log.read_text(encoding="utf-8")) if "mcp.command done" in line]
@@ -642,59 +529,24 @@ def test_mcp_command_done_event_reaches_each_sink_exactly_once(
         assert "isError=false" in line
 
 
-# ---------------------------------------------------------------------------
-# Task 5: client admin operation events
-# ---------------------------------------------------------------------------
-
-
 def test_admin_operation_event_uses_the_unified_format(tmp_path: Path) -> None:
-    """Admin events ride the same unified [LEVEL] line, INFO, once per sink."""
+    """Admin events ride the same unified [LEVEL] line, once per sink."""
     import asyncio
 
-    from mcp_relay.capabilities.control import ControlCapability
-    from mcp_relay.mcp_hub import McpHub
-    from mcp_relay.protocol import InvokeMessage
+    from mcp_relay.control import Control
+    from mcp_relay.mcp_catalog import ClientCatalog
+    from mcp_relay.mcp_command import CommandError
 
-    config_path = tmp_path / "config.yaml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
-        "relay_url: wss://relay.example.test/ws\n"
-        f"workspace: {tmp_path / 'ws'}\n",
-        encoding="utf-8",
-    )
-    hub = McpHub(
-        config_path,
-        tmp_path / "ws",
-        transport_factory=lambda launch: (_ for _ in ()).throw(
-            AssertionError("no transport expected")
-        ),
-    )
-    capability = ControlCapability(
-        hub=hub,
-        workspace=tmp_path / "ws",
-        client_version="0.1.0",
-        admin_enabled=False,
-    )
-
+    control = Control(hub=None, catalog=ClientCatalog(), client_version="0.1.0")
     with _LoggingState(), _applied_logging(tmp_path) as (stderr, log):
-        message = InvokeMessage(
-            version=2,
-            type="invoke",
-            request_id="req-admin",
-            tool_name="mcp.delete",
-            arguments={"alias": "ghost"},
-        )
-        result = asyncio.run(capability.invoke(message))
-    assert result["code"] == "permission_denied"
+        with pytest.raises(CommandError) as refused:
+            asyncio.run(
+                control.invoke("mcp.delete", {"alias": "ghost"}, request_id="req-admin")
+            )
+    assert refused.value.code == "permission_denied"
 
-    stderr_lines = [
-        line for line in _lines(stderr.getvalue()) if "mcp.admin" in line
-    ]
-    file_lines = [
-        line
-        for line in _lines(log.read_text(encoding="utf-8"))
-        if "mcp.admin" in line
-    ]
+    stderr_lines = [line for line in _lines(stderr.getvalue()) if "mcp.admin" in line]
+    file_lines = [line for line in _lines(log.read_text(encoding="utf-8")) if "mcp.admin" in line]
     assert len(stderr_lines) == 1, stderr_lines
     assert len(file_lines) == 1, file_lines
     for line in stderr_lines + file_lines:

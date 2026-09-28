@@ -12,9 +12,9 @@ import secrets
 import signal
 import stat
 import time
-from collections.abc import Coroutine, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, AsyncContextManager, Awaitable, Callable, Protocol, cast
+from typing import Any, AsyncContextManager, Callable, Protocol
 from urllib.parse import urlparse
 
 import websockets
@@ -28,11 +28,8 @@ from pydantic import (
 )
 
 from . import json_bounds
-from .capabilities.base import (
-    CapabilityProviderClient,
-    LocalCapability,
-)
-from .config import load_client_settings
+from .config import load_client_admin_setting, load_client_settings
+from .control import Control
 from .diagnostics import debug as _debug_log
 from .diagnostics import error as _error_log
 from .diagnostics import info as _info_log
@@ -40,13 +37,17 @@ from .diagnostics import set_log_file as _set_log_file
 from .environment import UnknownRelayEnvironmentError
 from .mcp_catalog import ClientCatalog
 from .mcp_command import CommandError, execute_command
+from .mcp_hub import McpHub, production_transport_factory
+from .mcp_registry import lookup_registry_server
 from .protocol import (
     MAX_TOKEN_LENGTH,
     MIN_TOKEN_LENGTH,
+    OP_MCP_COMMAND,
     RELAY_CONTRACT,
     TOKEN_PATTERN,
     Cancel,
     Capabilities,
+    Catalog,
     ClientError,
     ClientResult,
     ErrorDetail,
@@ -55,15 +56,7 @@ from .protocol import (
     Registered,
     parse_server_message,
 )
-from .provider_tools import ProviderToolDescriptor
-from .providers.base import (
-    ProviderResultTooLargeError,
-    ProviderToolClient,
-    bounded_arguments,
-    bounded_descriptors,
-    bounded_result,
-)
-from .relay_tools import WIRE_OPERATION_NAMES
+from .providers.base import ProviderResultTooLargeError, bounded_result
 from .version import bounded_version_label, package_version
 
 
@@ -83,10 +76,6 @@ def _debug_configuration_validation(error: ValidationError) -> None:
     _debug_log("client configuration rejected fields: " + ", ".join(locations))
 
 
-class ProviderUnavailableError(ConnectionError):
-    """A selected provider became unavailable during an Client session."""
-
-
 class ProtocolIncompatibleError(ConnectionError):
     """The Server closed the connection over a relay-contract mismatch.
 
@@ -100,18 +89,9 @@ class ProtocolIncompatibleError(ConnectionError):
         self.reason = reason
 
 
-def _debug_client_phase(phase: str) -> None:
-    _debug_log(f"client lifecycle phase: {phase}")
-
-
 def _operator_client_info(message: str) -> None:
     """Emit concise lifecycle information without enabling native diagnostics."""
     _info_log(message)
-
-
-def _operator_client_debug(message: str) -> None:
-    """Emit a pre-dispatch debug event (file always, stderr under DEBUG)."""
-    _debug_log(message)
 
 
 def _operator_client_error(message: str) -> None:
@@ -254,6 +234,10 @@ HEARTBEAT_INTERVAL_SECONDS: float = 15.0
 RECONNECT_MIN_SECONDS: float = 0.1
 RECONNECT_MAX_SECONDS: float = 5.0
 STABLE_SESSION_SECONDS: float = 30.0
+#: Delay that coalesces a burst of hub changes into one catalog frame.
+CATALOG_COALESCE_SECONDS: float = 0.05
+#: Room kept inside a WebSocket frame for the catalog envelope.
+CATALOG_FRAME_MARGIN_BYTES: int = 64 * 1024
 
 _CLIENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
@@ -474,50 +458,30 @@ class RelayClient:
         self,
         settings: ClientSettings,
         *,
-        capabilities: Sequence[LocalCapability] | None = None,
+        control: Control | None = None,
+        catalog: ClientCatalog | None = None,
+        hub: McpHub | None = None,
         connector: Callable[..., AsyncContextManager[TextSocket]] | None = None,
         monotonic: Callable[[], float] | None = None,
-        provider_clients: Mapping[str, ProviderToolClient] | None = None,
-        provider_resolver: Callable[
-            [], Awaitable[Mapping[str, ProviderToolClient]]
-        ] | None = None,
     ) -> None:
         self.settings = settings
-        configured_capabilities = list(capabilities or ())
-        self._capabilities = self._index_capabilities(configured_capabilities)
-        self._unique_capabilities = tuple(dict.fromkeys(map(id, configured_capabilities)))
-        self._capability_objects = {id(item): item for item in configured_capabilities}
-        self._provider_clients = dict(provider_clients or {})
-        self._provider_resolver = provider_resolver
-        self._provider_close_objects = {
-            id(client): client for client in self._provider_clients.values()
-            if id(client) not in self._capability_objects
-        }
-        self._provider_routes: dict[
-            str, tuple[ProviderToolClient, ProviderToolDescriptor]
-        ] = {}
-        self._announcement_tools: tuple[str, ...] = ()
-        # Third-party execution path: the client catalog holds alias records
-        # and route references; commands reserve a route and send exactly once.
-        self.catalog: ClientCatalog | None = None
-        self._inventory_ready = False
+        self.catalog = catalog if catalog is not None else ClientCatalog()
+        self.hub = hub
+        self.control = control or Control(
+            hub=hub, catalog=self.catalog, client_version="unknown"
+        )
         self._close_task: asyncio.Task[None] | None = None
-        # Step 7B: the initial MCP reconciliation, owned by this client and
-        # stopped explicitly in ``aclose`` — never an orphan task.
+        # The initial MCP reconciliation, owned here and stopped in ``aclose``.
         self._startup_task: asyncio.Task[None] | None = None
         self._closed = False
         self._stop_event = asyncio.Event()
+        self._catalog_dirty = asyncio.Event()
         self._write_lock = asyncio.Lock()
         self._connector = connector or websockets.connect
         self._session_registered = False
         self._registered_at: float | None = None
-        self._socket: TextSocket | None = None
-        # Package version announced by the Relay Server during the handshake.
-        # ``unknown`` until a server that omits the field connects (legacy
-        # servers) or before the first session; it is never client-supplied.
+        # Announced by the Server in ``registered``; never Client-supplied.
         self._server_version = "unknown"
-        # This Client's installed package version, resolved once. ``unknown``
-        # only when the distribution metadata is unavailable.
         self._client_version = bounded_version_label(package_version()) or "unknown"
         self._monotonic = monotonic or time.monotonic
 
@@ -531,14 +495,9 @@ class RelayClient:
         """This Client's installed package version, or ``"unknown"``."""
         return self._client_version
 
-    @property
-    def connection_metadata(self) -> dict[str, str]:
-        """Structured, secret-free metadata about the current connection."""
-        return {"server_version": self._server_version}
-
     def _report_version_skew(self) -> None:
         """Emit one bounded operator line when Server and Client versions differ."""
-        if self._client_version == "unknown" or self._server_version == "unknown":
+        if "unknown" in (self._client_version, self._server_version):
             return
         if self._client_version == self._server_version:
             return
@@ -550,23 +509,34 @@ class RelayClient:
     def stop(self) -> None:
         self._stop_event.set()
 
-    def start_initial_reconciliation(
-        self, reconciliation: Callable[[], Coroutine[None, None, None]]
-    ) -> asyncio.Task[None]:
-        """Own the initial MCP reconciliation as an explicit background task.
+    def catalog_changed(self) -> None:
+        """Refresh the catalog from the hub and schedule a push to the Server."""
+        if self.hub is not None:
+            self.hub.publish_catalog(self.catalog)
+        self._catalog_dirty.set()
 
-        Step 7B: the control-channel connection and its heartbeat must
-        never wait for the (possibly long) local MCP startup. The
-        reconciliation runs as a task owned by this client; ``aclose``
-        cancels and awaits it exactly once, so no orphan task survives
-        shutdown. Cancelling the reconciliation mid-spawn is safe: the hub
-        closes the in-flight transport and reports the alias unavailable
-        (``spawn_cancelled``), keeping the committed YAML unchanged.
+    def start_initial_reconciliation(self) -> asyncio.Task[None]:
+        """Start local MCP servers without delaying the control connection.
+
+        Cancelling mid-spawn is safe: the hub closes the in-flight transport
+        and reports the alias ``spawn_cancelled``; the YAML is unchanged.
         """
         if self._startup_task is not None and not self._startup_task.done():
             raise RuntimeError("initial reconciliation already started")
-        self._startup_task = asyncio.create_task(reconciliation())
+        self._startup_task = asyncio.create_task(self._initial_reconciliation())
         return self._startup_task
+
+    async def _initial_reconciliation(self) -> None:
+        if self.hub is None:
+            return
+        try:
+            await self.hub.reconcile_all()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            _debug_log(f"hub startup incomplete: {type(error).__name__}")
+        finally:
+            self.catalog_changed()
 
     def _connection_options(self) -> dict[str, Any]:
         return _connection_options_for(self.settings, self._connector)
@@ -580,38 +550,25 @@ class RelayClient:
                 self._server_version = "unknown"
                 connection_open = False
                 try:
-                    _debug_client_phase("capabilities-start")
-                    await self._start_capabilities()
-                    _debug_client_phase("capabilities-ready")
                     _operator_client_info(
                         f"connection attempt to {safe_server_target(self.settings.server_url)}"
                     )
-                    _debug_client_phase("connect")
                     async with self._connector(
                         self.settings.server_url,
                         **self._connection_options(),
                     ) as socket:
                         connection_open = True
                         _operator_client_info("WebSocket connection established")
-                        _debug_client_phase("connected")
                         await self.run_session(socket)
                 except asyncio.CancelledError:
                     raise
-                except ProviderUnavailableError:
-                    _operator_client_info("local capability became unavailable; stopping")
-                    self.stop()
                 except ProtocolIncompatibleError as error:
-                    # A permanent contract mismatch (close 1002 with the
-                    # protocol_incompatible diagnostic): automatic retries
-                    # can never succeed against the same Server build. The
-                    # operator updates one side and restarts the Client.
+                    # Retrying can never succeed against the same Server build.
                     _operator_client_info(
                         "Relay protocol is incompatible with the Server; "
                         "stopping automatic reconnection"
                     )
-                    _debug_log(
-                        f"client protocol incompatible: reason={error.reason}"
-                    )
+                    _debug_log(f"client protocol incompatible: reason={error.reason}")
                     self.stop()
                 except Exception as error:
                     if self._session_registered:
@@ -624,17 +581,12 @@ class RelayClient:
                         _operator_client_info(
                             "connection or authentication failed; retrying"
                         )
-                    phase = getattr(error, "startup_phase", None)
-                    detail = f" phase-{phase}" if isinstance(phase, str) else ""
-                    _debug_log(f"client reconnect: {type(error).__name__}{detail}")
-                    pass
+                    _debug_log(f"client reconnect: {type(error).__name__}")
                 else:
                     if self._session_registered and not self._stop_event.is_set():
                         _operator_client_info("Relay disconnected; reconnecting")
                     elif connection_open and not self._stop_event.is_set():
-                        _operator_client_info(
-                            "registration was rejected; retrying"
-                        )
+                        _operator_client_info("registration was rejected; retrying")
                 if self._session_was_stable():
                     delay = RECONNECT_MIN_SECONDS
                 if not self._stop_event.is_set():
@@ -646,95 +598,8 @@ class RelayClient:
         finally:
             await self.aclose()
 
-    @staticmethod
-    def _index_capabilities(
-        capabilities: Sequence[LocalCapability],
-    ) -> dict[str, LocalCapability]:
-        indexed: dict[str, LocalCapability] = {}
-        for capability in capabilities:
-            for tool in capability.tools:
-                if not isinstance(tool, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", tool):
-                    raise ValueError("unsupported local capability")
-                if tool in indexed:
-                    raise ValueError(f"duplicate local capability: {tool}")
-                indexed[tool] = capability
-        return indexed
-
-    async def _start_capabilities(self) -> None:
-        """Start injected capabilities, then atomically publish the inventory.
-
-        No native tools or reference inventory exist. Provider clients come
-        from the static mapping or, when a resolver is configured, from the
-        resolver's current answer (the alias hub), so each announcement
-        reflects the runtime hub state.
-        """
-        for ident in self._unique_capabilities:
-            capability = self._capability_objects[ident]
-            await capability.start()
-        await self._publish_inventory()
-
-    async def _publish_inventory(self) -> None:
-        """Publish the fixed Relay announcement and local capability routes.
-
-        The announcement carries exactly the fixed wire operations from
-        ``relay_tools`` — never third-party descriptors, never schemas, and
-        independent of the admin setting. Local capabilities keep explicit
-        routes (the control verbs); third-party execution goes exclusively
-        through the client catalog via ``mcp.command``.
-        """
-        routes: dict[str, tuple[ProviderToolClient, ProviderToolDescriptor]] = {}
-        for ident in self._unique_capabilities:
-            capability = self._capability_objects[ident]
-            inventory = bounded_descriptors(await capability.list_tools())
-            if {f"{d.provider_name}.{d.tool_name}" for d in inventory} != set(capability.tools):
-                raise ConfigurationError()
-            client = CapabilityProviderClient(capability, inventory)
-            for descriptor in inventory:
-                wire_name = f"{descriptor.provider_name}.{descriptor.tool_name}"
-                if wire_name in routes:
-                    raise ConfigurationError()
-                routes[wire_name] = (client, descriptor)
-        announcement_tools = sorted(WIRE_OPERATION_NAMES)
-        if not set(announcement_tools).issubset(set(routes) | set(WIRE_OPERATION_NAMES)):
-            raise ConfigurationError()
-        # Validate the wire envelope shape (closed op set, bounds).
-        Capabilities(
-            version=1,
-            type="capabilities",
-            tools=announcement_tools,
-            relay_contract=RELAY_CONTRACT,
-            client_version=self._client_version,
-        )
-        self._provider_routes = routes
-        self._announcement_tools = tuple(announcement_tools)
-        self._inventory_ready = True
-
-    async def reannounce(self) -> None:
-        """Re-publish the inventory to the connected Server, if any.
-
-        Invoked by the control capability after an inventory-changing
-        mutation. Without a live session the call is a no-op: the next
-        session start rebuilds and announces the inventory anyway.
-        """
-        if self._closed:
-            return
-        await self._publish_inventory()
-        socket = self._socket
-        if socket is None:
-            return
-        await self._send(
-            socket,
-            Capabilities(
-                version=1,
-                type="capabilities",
-                tools=list(self._announcement_tools),
-                relay_contract=RELAY_CONTRACT,
-                client_version=self._client_version,
-            ).model_dump(mode="json", exclude_defaults=True),
-        )
-
     async def aclose(self) -> None:
-        """Close every configured capability exactly once."""
+        """Stop the reconciliation and every local MCP server exactly once."""
         if self._close_task is None:
             self._closed = True
             self._close_task = asyncio.create_task(self._aclose_owned())
@@ -751,18 +616,14 @@ class RelayClient:
             raise cancellation
 
     async def _aclose_owned(self) -> None:
-        # Step 7B: stop the owned reconciliation task first so a mid-spawn
-        # cancellation closes the in-flight transport before the
-        # capabilities are torn down.
+        # Stop the reconciliation first so a mid-spawn cancellation closes the
+        # in-flight transport before the hub is torn down.
         startup, self._startup_task = self._startup_task, None
         if startup is not None:
             startup.cancel()
             await asyncio.gather(startup, return_exceptions=True)
-        for ident in self._unique_capabilities:
-            capability = self._capability_objects[ident]
-            await asyncio.gather(capability.aclose(), return_exceptions=True)
-        for client in self._provider_close_objects.values():
-            await asyncio.gather(client.close(), return_exceptions=True)
+        if self.hub is not None:
+            await asyncio.gather(self.hub.aclose(), return_exceptions=True)
 
     def _session_was_stable(self) -> bool:
         """Only reset after a registered connection outlives the local threshold."""
@@ -778,10 +639,6 @@ class RelayClient:
             pass
 
     async def run_session(self, socket: TextSocket) -> None:
-        if not self._inventory_ready:
-            await self._start_capabilities()
-        self._socket = socket
-        _debug_client_phase("register-send")
         await self._send(
             socket,
             {
@@ -794,11 +651,9 @@ class RelayClient:
         registered = await self._receive(socket)
         if not isinstance(registered, Registered) or registered.client_id != self.settings.client_id:
             raise ValueError("server did not confirm registration")
-        # The Server's own package version rides in the existing handshake.
-        # The field is mandatory on Registered, but the ``unknown`` fallback
-        # keeps this side defensive against a hypothetical schema drift.
+        if registered.relay_contract != RELAY_CONTRACT:
+            raise ProtocolIncompatibleError("relay contract mismatch")
         self._server_version = registered.server_version or "unknown"
-        _debug_client_phase("registered")
         self._session_registered = True
         self._registered_at = self._monotonic()
         _operator_client_info(
@@ -813,82 +668,37 @@ class RelayClient:
             Capabilities(
                 version=1,
                 type="capabilities",
-                tools=list(self._announcement_tools),
                 relay_contract=RELAY_CONTRACT,
                 client_version=self._client_version,
-            ).model_dump(mode="json", exclude_defaults=True),
+                admin=self.control.admin_enabled,
+            ).model_dump(mode="json"),
         )
-        capability_summary = ", ".join(self._announcement_tools) or "none"
-        _operator_client_info(
-            f"capabilities announced ({len(self._announcement_tools)}): {capability_summary}"
-        )
-        _debug_client_phase("capabilities-send")
+        self._catalog_dirty.set()
         heartbeat = asyncio.create_task(self._heartbeat(socket))
+        pusher = asyncio.create_task(self._push_catalog(socket))
         action: asyncio.Task[None] | None = None
         action_request_id: str | None = None
         cancelled_requests: set[str] = set()
-        receive: asyncio.Task[object] | None = asyncio.create_task(self._receive(socket))
+        receive: asyncio.Task[object] = asyncio.create_task(self._receive(socket))
         stopping = asyncio.create_task(self._stop_event.wait())
-        unavailable = {asyncio.create_task(self._capability_objects[ident].wait_unavailable()) for ident in self._unique_capabilities}
-        provider_unavailable: set[asyncio.Task[object]] = set()
-        for provider in self._provider_close_objects.values():
-            waiter = getattr(provider, "wait_unavailable", None)
-            if callable(waiter):
-                wait_unavailable = cast(Callable[[], Coroutine[Any, Any, None]], waiter)
-                provider_unavailable.add(asyncio.create_task(wait_unavailable()))
-        # Third-party routes: watch the catalog's alias providers too.
-        if self.catalog is not None:
-            for alias, record in sorted(self.catalog.snapshot._records.items()):
-                provider = record.provider
-                if provider is None:
-                    continue
-                waiter = getattr(provider, "wait_unavailable", None)
-                if callable(waiter):
-                    wait_unavailable = cast(
-                        Callable[[], Coroutine[Any, Any, None]], waiter
-                    )
-                    provider_unavailable.add(asyncio.create_task(wait_unavailable()))
         try:
             while not self._stop_event.is_set():
-                wait_for = {receive, stopping, *unavailable, *provider_unavailable}
+                wait_for: set[asyncio.Task[Any]] = {receive, stopping, pusher, heartbeat}
                 if action is not None:
                     wait_for.add(action)
                 done, _ = await asyncio.wait(wait_for, return_when=asyncio.FIRST_COMPLETED)
                 if stopping in done:
                     break
-                if done & unavailable:
-                    _debug_client_phase("session-exit-capability-unavailable")
-                    if action is not None:
-                        if action_request_id is not None:
-                            cancelled_requests.add(action_request_id)
-                        action.cancel()
-                        await asyncio.gather(action, return_exceptions=True)
-                        action = None
-                        action_request_id = None
-                    raise ConnectionError("local capability unavailable")
-                if done & provider_unavailable:
-                    # A third-party MCP provider failing never kills the
-                    # Client: that alias becomes non-executable (its runtime
-                    # owner closes the transport; the catalog reflects the
-                    # failure) while the local capabilities, the other
-                    # aliases, and the session keep serving.
-                    for task in done & provider_unavailable:
-                        provider_unavailable.discard(task)
-                    _debug_client_phase("alias-provider-unavailable-isolated")
+                for background in (pusher, heartbeat):
+                    if background in done:
+                        await background  # re-raise the send failure
+                        raise ConnectionError("session task ended")
                 if action is not None and action in done:
-                    try:
-                        await action
-                    except BaseException:
-                        _debug_client_phase("session-exit-action-failed")
-                        raise
+                    await action
                     action = None
                     action_request_id = None
                 if receive in done:
-                    try:
-                        message = receive.result()
-                    except BaseException:
-                        _debug_client_phase("session-exit-receive-failed")
-                        raise
+                    message = receive.result()
                     receive = asyncio.create_task(self._receive(socket))
                     if isinstance(message, InvokeMessage):
                         if action is not None:
@@ -909,27 +719,14 @@ class RelayClient:
                     else:
                         raise ValueError("unexpected server message")
         finally:
-            self._socket = None
-            heartbeat.cancel()
-            if receive is not None:
-                receive.cancel()
-            stopping.cancel()
-            for task in unavailable:
-                task.cancel()
-            for task in provider_unavailable:
-                task.cancel()
+            tasks = [heartbeat, pusher, receive, stopping]
             if action is not None:
                 if action_request_id is not None:
                     cancelled_requests.add(action_request_id)
-                action.cancel()
-            await asyncio.gather(
-                heartbeat,
-                stopping,
-                *unavailable,
-                *provider_unavailable,
-                *(item for item in (receive, action) if item is not None),
-                return_exceptions=True,
-            )
+                tasks.append(action)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _heartbeat(self, socket: TextSocket) -> None:
         while not self._stop_event.is_set():
@@ -937,226 +734,103 @@ class RelayClient:
             if not self._stop_event.is_set():
                 await self._send(socket, Heartbeat(version=2, type="heartbeat").model_dump(mode="json"))
 
+    async def _push_catalog(self, socket: TextSocket) -> None:
+        """Send the catalog on session start and after every effective change."""
+        last_sent: list[dict[str, Any]] | None = None
+        while True:
+            await self._catalog_dirty.wait()
+            # Coalesce a burst of hub changes into one frame.
+            await asyncio.sleep(CATALOG_COALESCE_SECONDS)
+            self._catalog_dirty.clear()
+            tools = self.catalog.build(max_bytes=_catalog_budget())
+            if tools == last_sent:
+                continue
+            await self._send(
+                socket,
+                Catalog(version=2, type="catalog", tools=tools).model_dump(
+                    mode="json", exclude_none=True
+                ),
+            )
+            last_sent = tools
+            _operator_client_info(f"tool catalog published ({len(tools)} tools)")
+
     async def _perform(
         self,
         socket: TextSocket,
         message: InvokeMessage,
         cancelled_requests: set[str],
     ) -> None:
+        target = self._log_target(message)
         try:
-            if message.tool_name == "mcp.command":
-                # Third-party execution: closed envelope, catalog reservation,
-                # exactly one send, native result. Never the control path.
-                await self._perform_mcp_command(socket, message, cancelled_requests)
-                return
-            route = self._provider_routes.get(message.tool_name)
-            if route is None:
-                raise ValueError("unsupported provider tool")
-            provider, descriptor = route
-            arguments = message.arguments
-            if descriptor is not None:
-                # The driver remains the sole validator; the relay enforces
-                # transport bounds only and never interprets the schema.
-                arguments = bounded_arguments(arguments)
-                provider_tool_name = descriptor.tool_name
+            if message.tool_name == OP_MCP_COMMAND:
+                _debug_log(f"mcp.command start: request_id={message.request_id}{target}")
+                result = await execute_command(message.arguments, catalog=self.catalog)
             else:
-                provider_tool_name = message.tool_name
-            _operator_client_info(f"Executing tool: {message.tool_name}")
-            if isinstance(provider, CapabilityProviderClient):
-                result = await provider.call_message(
-                    provider_tool_name,
-                    arguments,
+                payload = await self.control.invoke(
+                    message.tool_name,
+                    dict(message.arguments),
                     request_id=message.request_id,
                 )
-            else:
-                result = await provider.call_tool(provider_tool_name, arguments)
+                result = bounded_result(
+                    {
+                        "content": [{"type": "text", "text": json.dumps(payload)}],
+                        "structuredContent": payload,
+                    }
+                )
             if message.request_id in cancelled_requests:
+                # A provider that swallows cancellation must not yield a late result.
                 return
-            provider_result = bounded_result(result)
             await self._send(
                 socket,
                 ClientResult(
                     version=2,
                     type="result",
                     request_id=message.request_id,
-                    result=provider_result,
+                    result=result,
                 ).model_dump(mode="json", by_alias=True, exclude_none=True),
             )
+            if message.tool_name == OP_MCP_COMMAND:
+                _operator_client_info(
+                    f"mcp.command done: request_id={message.request_id}{target} "
+                    f"isError={str(result.is_error).lower()}"
+                )
         except asyncio.CancelledError:
             raise
-        except ProviderResultTooLargeError as error:
-            if message.request_id in cancelled_requests:
-                return
-            detail = getattr(error, "detail", None)
-            _debug_log(
-                "client invocation refused: "
-                f"tool={message.tool_name} code=result_too_large"
-                + (f" | {detail}" if detail else "")
-            )
-            await self._send(
-                socket,
-                ClientError(
-                    version=2,
-                    type="error",
-                    request_id=message.request_id,
-                    error=ErrorDetail(
-                        code="result_too_large",
-                        message=(
-                            f"tool '{message.tool_name}': {detail}"
-                            if detail
-                            else ProviderResultTooLargeError.wire_message
-                        ),
-                        execution_state="unknown",
-                    ),
-                ).model_dump(mode="json"),
-            )
-        except CommandError as error:
-            if message.request_id in cancelled_requests:
-                return
-            _debug_log(
-                "client command refused: "
-                f"tool={message.tool_name} code={error.code} "
-                f"state={error.execution_state}"
-            )
-            await self._send(
-                socket,
-                ClientError(
-                    version=2,
-                    type="error",
-                    request_id=message.request_id,
-                    error=error.to_payload(),
-                ).model_dump(mode="json"),
-            )
         except Exception as error:
             if message.request_id in cancelled_requests:
                 return
-            error_detail = f"{type(error).__name__}: {error}".replace(
-                "\n", " "
-            )[:200]
-            _debug_log(
-                "client invocation failed: "
-                f"tool={message.tool_name} exception={error_detail}"
-            )
-            await self._send_error(socket, message.request_id, "client_error", "local action failed")
-
-    async def _perform_mcp_command(
-        self,
-        socket: TextSocket,
-        message: InvokeMessage,
-        cancelled_requests: set[str],
-    ) -> None:
-        # A single safe target suffix is shared by DEBUG start and ERROR failed.
-        # Never print a raw envelope value in an operator log.
-        def safe_identifier(value: object) -> str | None:
-            if not isinstance(value, str) or not re.fullmatch(
-                r"[A-Za-z0-9_.:/-]{1,128}", value
-            ):
-                return None
-            return value
-
-        candidate_alias = safe_identifier(message.arguments.get("alias"))
-        candidate_tool = safe_identifier(message.arguments.get("tool"))
-        # An unknown name is still caller-controlled data; looking like an
-        # identifier does not prove it cannot be a token. Only log names
-        # already present in the trusted local catalog snapshot.
-        record = (
-            self.catalog.snapshot._records.get(candidate_alias)
-            if self.catalog is not None and candidate_alias is not None
-            else None
-        )
-        alias = candidate_alias if record is not None else None
-        tool = (
-            candidate_tool
-            if record is not None
-            and any(item.name == candidate_tool for item in record.descriptors)
-            else None
-        )
-        target = (f" alias={alias}" if alias is not None else "") + (
-            f" tool={tool}" if tool is not None else ""
-        )
-        try:
-            await self._perform_mcp_command_outcome(
-                socket, message, cancelled_requests, target
-            )
-        except asyncio.CancelledError:
-            # A cancelled command is silent: no fake done, no failure event.
-            raise
-        except CommandError as error:
-            if message.request_id not in cancelled_requests:
+            detail = _command_error(error, message.tool_name)
+            if message.tool_name == OP_MCP_COMMAND:
                 _operator_client_error(
-                    "mcp.command failed: "
-                    f"request_id={message.request_id}{target} "
-                    f"code={error.code} "
-                    f"execution_state={error.execution_state}"
+                    f"mcp.command failed: request_id={message.request_id}{target} "
+                    f"code={detail.code} execution_state={detail.execution_state}"
                 )
-            raise
-        except ProviderResultTooLargeError:
-            if message.request_id not in cancelled_requests:
-                _operator_client_error(
-                    "mcp.command failed: "
-                    f"request_id={message.request_id}{target} "
-                    "code=result_too_large "
-                    "execution_state=unknown"
-                )
-            raise
-        except Exception:
-            if message.request_id not in cancelled_requests:
-                _operator_client_error(
-                    "mcp.command failed: "
-                    f"request_id={message.request_id}{target} "
-                    "code=client_error "
-                    "execution_state=unknown"
-                )
-            raise
-
-    async def _perform_mcp_command_outcome(
-        self,
-        socket: TextSocket,
-        message: InvokeMessage,
-        cancelled_requests: set[str],
-        target: str,
-    ) -> None:
-        # Pre-dispatch start event: the same bounded identifiers as failed.
-        _operator_client_debug(
-            "mcp.command start: "
-            f"request_id={message.request_id}{target}"
-        )
-        if self.catalog is None:
-            raise CommandError(
-                "execution_failed",
-                "no local MCP catalog is available",
-                execution_state="not_started",
+            await self._send(
+                socket,
+                ClientError(
+                    version=2,
+                    type="error",
+                    request_id=message.request_id,
+                    error=ErrorDetail(**detail.to_payload()),
+                ).model_dump(mode="json"),
             )
-        outcome = await execute_command(message.arguments, catalog=self.catalog)
-        if message.request_id in cancelled_requests:
-            # The invocation was cancelled while the provider ran; a provider
-            # that swallows cancellation must not yield a late result.
-            return
-        await self._send(
-            socket,
-            ClientResult(
-                version=2,
-                type="result",
-                request_id=message.request_id,
-                result=outcome.result,
-            ).model_dump(mode="json", by_alias=True, exclude_none=True),
-        )
-        # Terminal success event: result received ≠ business success. The
-        # native isError flag is the only result content ever inspected;
-        # alias/tool are the envelope identifiers execute_command validated.
-        _operator_client_info(
-            "mcp.command done: "
-            f"request_id={message.request_id}{target} "
-            f"isError={str(outcome.result.is_error).lower()}"
-            + (" error_source=provider" if outcome.result.is_error else "")
-        )
+
+    def _log_target(self, message: InvokeMessage) -> str:
+        """Alias/tool suffix for logs, only for names already in the catalog."""
+        if message.tool_name != OP_MCP_COMMAND:
+            return ""
+        alias = message.arguments.get("alias")
+        tool = message.arguments.get("tool")
+        record = self.catalog.records.get(alias) if isinstance(alias, str) else None
+        if record is None:
+            return ""
+        known_tool = any(d.name == tool for d in record.descriptors)
+        return f" alias={alias}" + (f" tool={tool}" if known_tool else "")
 
     async def _receive(self, socket: TextSocket) -> object:
         try:
             text = await socket.recv()
         except websockets.exceptions.ConnectionClosed as closed:
-            # A 1002 close carrying the protocol_incompatible diagnostic is a
-            # permanent contract mismatch, distinct from transient failures.
             received = closed.rcvd
             if (
                 received is not None
@@ -1200,15 +874,36 @@ class RelayClient:
                 version=2,
                 type="error",
                 request_id=request_id,
-                error={
-                    "code": code,
-                    "message": message,
-                    # Control-path failures never dispatch an MCP business
-                    # operation, so the target was never contacted.
-                    "execution_state": "not_started",
-                },
+                error=ErrorDetail(
+                    code=code, message=message, execution_state="not_started"
+                ),
             ).model_dump(mode="json"),
         )
+
+
+def _catalog_budget() -> int:
+    """Bytes available to catalog entries inside one WebSocket frame."""
+    return max(0, json_bounds.MAX_WS_MESSAGE_BYTES - CATALOG_FRAME_MARGIN_BYTES)
+
+
+def _command_error(error: Exception, operation: str) -> CommandError:
+    """Map a local failure onto the closed {code, message, execution_state}."""
+    if isinstance(error, CommandError):
+        return error
+    if isinstance(error, ProviderResultTooLargeError):
+        detail = getattr(error, "detail", None)
+        return CommandError(
+            "result_too_large",
+            f"'{operation}': {detail}" if detail else ProviderResultTooLargeError.wire_message,
+            execution_state="unknown",
+        )
+    _debug_log(
+        "client invocation failed: "
+        f"operation={operation} exception={type(error).__name__}"
+    )
+    state = "unknown" if operation == OP_MCP_COMMAND else "not_started"
+    return CommandError("execution_failed", "local action failed", execution_state=state)
+
 
 async def _run_with_signal_handlers(client: RelayClient) -> None:
     loop = asyncio.get_running_loop()
@@ -1222,93 +917,52 @@ async def _run_with_signal_handlers(client: RelayClient) -> None:
     await client.run()
 
 
+def build_client(
+    settings: ClientSettings, *, config_path: Path | None = None
+) -> RelayClient:
+    """Wire the hub, catalog and control for one Client process.
+
+    Without a YAML file there is no hub: no local MCP servers and no
+    administration, only status.
+    """
+    catalog = ClientCatalog()
+    hub: McpHub | None = None
+    admin = False
+    if config_path is not None:
+        hub = McpHub(
+            config_path,
+            settings.workspace,
+            transport_factory=production_transport_factory,
+            source_resolver=_resolve_source,
+        )
+        admin = load_client_admin_setting(config_path)
+    control = Control(
+        hub=hub,
+        catalog=catalog,
+        client_version=bounded_version_label(package_version()) or "unknown",
+        admin_enabled=admin,
+    )
+    client = RelayClient(settings, control=control, catalog=catalog, hub=hub)
+    if hub is not None:
+        hub.bind_on_change(client.catalog_changed)
+    return client
+
+
+async def _resolve_source(source: str, version: str | None) -> Any:
+    return await lookup_registry_server(source, version=version)
+
+
 async def _run_client(
     settings: ClientSettings,
     *,
     config_path: Path | None = None,
 ) -> None:
-    control: ControlCapability | None = None
-    capabilities: list[LocalCapability] = []
-    if config_path is not None:
-        # YAML mode owns the local MCP server hub: reconcile the configured
-        # aliases, publish the third-party catalog, and expose the agent-facing
-        # control capability. Environment-only mode has no YAML authority, so
-        # the control surface and the catalog stay off. The capability list is
-        # final BEFORE the RelayClient snapshot: appending after construction
-        # leaves the control capability unregistered and every routed verb
-        # fails with "unsupported provider tool".
-        from .capabilities.control import ControlCapability
-        from .config import load_client_admin_setting
-        from .mcp_catalog import ClientCatalog
-        from .mcp_hub import McpHub, production_transport_factory
-
-        hub = McpHub(
-            config_path,
-            settings.workspace,
-            transport_factory=production_transport_factory,
-        )
-        catalog = ClientCatalog()
-        control = ControlCapability(
-            hub=hub,
-            workspace=settings.workspace,
-            client_version=bounded_version_label(package_version()) or "unknown",
-            admin_enabled=load_client_admin_setting(config_path),
-        )
-        control.bind_catalog(catalog)
-        capabilities.append(control)
-        client = RelayClient(settings, capabilities=capabilities)
-        client.catalog = catalog
-        control.bind_catalog_refresh(
-            lambda: _refresh_catalog(hub, catalog)
-        )
-    else:
-        client = RelayClient(settings, capabilities=capabilities)
-    if control is not None:
-        control.bind_inventory_change(client.reannounce)
-        # Step 7B: publish the catalog on every runtime state change so
-        # STARTING and terminal states are observable while a startup is
-        # still in flight (including a cancelled admin-triggered spawn).
-        control.hub.bind_on_change(
-            lambda: _refresh_catalog(control.hub, client.catalog)
-        )
+    client = build_client(settings, config_path=config_path)
     try:
-        if control is not None:
-            # Step 7B: the initial reconciliation is decoupled from the
-            # connection — it runs as a task owned by the client (stopped
-            # explicitly in aclose), never inline before the session. A
-            # long alias startup can no longer delay the control channel.
-            client.start_initial_reconciliation(
-                lambda: _initial_reconciliation(control.hub, client.catalog)
-            )
+        client.start_initial_reconciliation()
         await _run_with_signal_handlers(client)
     finally:
         await client.aclose()
-
-
-async def _initial_reconciliation(hub: Any, catalog: Any) -> None:
-    """Run the initial MCP reconciliation as an owned background task.
-
-    Step 7B: this coroutine is never awaited inline by ``_run_client`` — it
-    runs as a task owned by the RelayClient so the control connection and
-    heartbeat start independently of a long local MCP startup. Alias
-    startup failures never block the control channel: the aliases report
-    their state through the catalog and the tools.
-    """
-    try:
-        await hub.reconcile_all()
-    except asyncio.CancelledError:
-        raise
-    except Exception as error:
-        _debug_log(f"hub startup incomplete: {type(error).__name__}")
-    finally:
-        _refresh_catalog(hub, catalog)
-
-
-def _refresh_catalog(hub: Any, catalog: Any) -> None:
-    """Publish the hub's current alias state into the client catalog."""
-    if catalog is None:
-        return
-    hub.publish_catalog(catalog)
 
 
 def main(

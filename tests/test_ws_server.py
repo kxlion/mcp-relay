@@ -1,15 +1,11 @@
-"""Characterization and app-separation tests for the two Relay listeners.
+"""Tests for the two Relay listeners.
 
-Part 1 (characterization): pins the observable /ws handshake and lifecycle
-behavior of the WebSocket handler exactly as shipped before the Step 5
-extraction into ``ws_server.py`` — authentication, register-first, contract
-checks, frame bounds, duplicate connections, disconnect cleanup and
-reconnection. These tests run against the composite ``create_app()`` and must
-stay green across the refactor.
+Part 1: the /ws handshake and lifecycle — authentication, register-first,
+contract checks, frame bounds, duplicate connections, disconnect cleanup and
+reconnection.
 
-Part 2 (Step 5 behavior): the MCP listener app and the WS listener app are
-two explicit factories receiving the SAME ``RelayRegistry``, each serving
-exactly one surface.
+Part 2: the MCP listener app and the WS listener app are two factories
+receiving the same ``RelayRegistry``, each serving exactly one surface.
 """
 
 from __future__ import annotations
@@ -31,8 +27,9 @@ from mcp_relay.protocol import (
     Register,
 )
 from mcp_relay.registry import RelayRegistry
-from mcp_relay.server import RelaySettings, create_app
+from mcp_relay.server import RelaySettings
 from mcp_relay.version import package_version
+from tests.composite_app import create_app
 
 
 def settings() -> RelaySettings:
@@ -54,7 +51,7 @@ def capabilities_frame() -> dict[str, object]:
     return {
         "version": 1,
         "type": "capabilities",
-        "tools": ["sample.exec"],
+        "admin": True,
         "relay_contract": RELAY_CONTRACT,
         "client_version": "0.2.0",
     }
@@ -204,13 +201,13 @@ def test_characterized_contract_mismatch_is_a_permanent_1002_close() -> None:
         ) as ws:
             ws.send_json(register_frame())
             assert ws.receive_json()["type"] == "registered"
-            ws.send_json({"version": 1, "type": "capabilities", "tools": [], "relay_contract": 99, "client_version": "0.1.0"})
+            ws.send_json({"version": 1, "type": "capabilities", "admin": True, "relay_contract": 99, "client_version": "0.1.0"})
             with pytest.raises(WebSocketDisconnect) as exc_info:
                 ws.receive_json()
             assert exc_info.value.code == 1002
 
     # A contract-mismatched capabilities frame never updates the registry.
-    assert app.state.registry.announced_capabilities == frozenset()
+    assert app.state.registry.client_admin is False
 
 
 def test_characterized_frame_bounds_and_protocol_errors_close_the_socket() -> None:
@@ -324,9 +321,7 @@ def test_characterized_capabilities_and_heartbeat_reach_the_registry(
             assert app.state.registry.last_heartbeat > before
             ws.send_json(capabilities_frame())
             assert capabilities_handled.wait(timeout=2)
-            assert app.state.registry.announced_capabilities == frozenset(
-                {"sample.exec"}
-            )
+            assert app.state.registry.client_admin is True
 
 
 def test_characterized_disconnect_cleanup_then_reconnection() -> None:
@@ -342,13 +337,11 @@ def test_characterized_disconnect_cleanup_then_reconnection() -> None:
             # The capabilities frame has been processed once the registry
             # announces it; the socket then closes cleanly.
             deadline = time.monotonic() + 2
-            while app.state.registry.announced_capabilities != frozenset(
-                {"sample.exec"}
-            ):
+            while not app.state.registry.client_admin:
                 assert time.monotonic() < deadline, "capabilities not processed"
                 time.sleep(0.01)
 
-        assert app.state.registry.announced_capabilities == frozenset()
+        assert app.state.registry.client_admin is False
 
         # Reconnection: the registry accepted the disconnect and releases the
         # slot; a new socket can register the same client identity again.
@@ -372,7 +365,7 @@ def test_characterized_disconnect_cleanup_then_reconnection() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Part 2: Step 5 behavior — two explicit listener factories, one registry
+# Part 2: two listener factories, one registry
 # ---------------------------------------------------------------------------
 
 
@@ -487,7 +480,7 @@ def test_ws_listener_rejects_the_mcp_token() -> None:
 
 
 def test_direct_shared_registry_registration_flows_into_fixed_facade() -> None:
-    """The fixed facade reflects a Client registered directly on the shared
+    """The MCP facade reflects a Client registered directly on the shared
     registry (the same object the WS listener authenticates sockets against);
     the full WS→registry→facade path is exercised in
     tests/test_server_listeners.py."""
@@ -501,9 +494,8 @@ def test_direct_shared_registry_registration_flows_into_fixed_facade() -> None:
 
         async with Client(mcp) as session:
             before_tools = [tool.name for tool in await session.list_tools()]
-            before = await session.call_tool("relay_server_status", {})
-            assert before.structured_content["connected"] is False
-            assert before.structured_content["suggested_action"] == "start_client"
+            before = await session.call_tool("relay_status", {})
+            assert before.structured_content["client"]["connected"] is False
 
         # A Client registers through the shared registry (the same object the
         # WS listener authenticates sockets against).
@@ -519,24 +511,24 @@ def test_direct_shared_registry_registration_flows_into_fixed_facade() -> None:
         )
 
         async with Client(mcp) as session:
-            during = await session.call_tool("relay_server_status", {})
-            assert during.structured_content["connected"] is True
-            assert during.structured_content["client_version"] == "0.2.0"
-            assert during.structured_content["capabilities"] == ["sample.exec"]
+            during = await session.call_tool("relay_status", {})
+            assert during.structured_content["client"]["connected"] is True
+            assert during.structured_content["client"]["version"] == "0.2.0"
+            assert during.structured_content["client"]["admin"] is True
+            assert "relay_mcp_add" in [tool.name for tool in await session.list_tools()]
 
         await registry.disconnect(socket, reason="closed:1000")
 
         async with Client(mcp) as session:
-            after = await session.call_tool("relay_server_status", {})
+            after = await session.call_tool("relay_status", {})
             after_tools = [
                 tool.name for tool in await session.list_tools()
             ]
-            assert after.structured_content["connected"] is False
-            assert after.structured_content["suggested_action"] == "start_client"
-            last_disconnect = after.structured_content["last_disconnect"]
+            assert after.structured_content["client"]["connected"] is False
+            last_disconnect = after.structured_content["client"]["last_disconnect"]
             assert last_disconnect["reason"] == "closed:1000"
 
-        # Reconnection works and the facade surface never changed.
+        # Reconnection works; without capabilities no admin tool is listed.
         socket_again = _RecordingSocket()
         await registry.register(
             socket_again,
@@ -545,8 +537,8 @@ def test_direct_shared_registry_registration_flows_into_fixed_facade() -> None:
             ),
         )
         async with Client(mcp) as session:
-            reconnected = await session.call_tool("relay_server_status", {})
-            assert reconnected.structured_content["connected"] is True
+            reconnected = await session.call_tool("relay_status", {})
+            assert reconnected.structured_content["client"]["connected"] is True
             assert [tool.name for tool in await session.list_tools()] == (
                 before_tools
             )

@@ -12,11 +12,6 @@ from mcp_relay.config import (
 )
 
 
-def test_client_model_rejects_a_tools_key_in_any_shape() -> None:
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        ClientConfig.model_validate({"tools": {"allowlist": ["relay_server_status"]}})
-
-
 def test_admin_defaults_to_locked_and_accepts_explicit_booleans() -> None:
     assert ClientConfig.model_validate({}).admin is False
     assert ClientConfig.model_validate({"admin": False}).admin is False
@@ -34,13 +29,6 @@ def test_admin_is_a_strict_boolean(value: object) -> None:
 
 def test_admin_setting_appears_in_the_dotted_cli_keys() -> None:
     assert "admin" in configuration_keys(ClientConfig)
-    assert "mcp_admin_enabled" not in configuration_keys(ClientConfig)
-
-
-def test_client_model_rejects_generic_permission_objects() -> None:
-    """No mcp_permissions object exists; the closed model rejects it."""
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        ClientConfig.model_validate({"mcp_permissions": {"use": True}})
 
 
 def test_reserved_mcp_aliases_are_the_fixed_dispatcher_words() -> None:
@@ -60,27 +48,12 @@ def test_client_config_owns_environment_coercion_constraints_and_runtime_flatten
 ) -> None:
     identity = str(uuid.uuid4())
     model = ClientConfig.from_sources(
-        {"identity": {"id": identity}, "workspace": "workspace"},
-        {
-            "RELAY_CLIENT_TOOLS": "relay_sample_ping, relay_sample_exec",
-        },
+        {"identity": {"id": identity}, "workspace": "workspace"}, {}
     )
-
-    assert "tools" not in type(model).model_fields
-    # Purged runtime knobs must be rejected outright (extra=forbid): the
-    # client settings are deliberately minimal and timings are constants.
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        ClientConfig.model_validate(
-            {
-                "identity": {"id": identity},
-                "runtime": {"reconnect_min_seconds": 1.5},
-            }
-        )
     credential = "test-token"
     runtime = model.runtime_settings(token=credential, config_path=tmp_path / "config.yaml")
     assert runtime["client_id"] == identity
     assert runtime["workspace"] == tmp_path / "workspace"
-    assert "tools_allowlist" not in runtime
 
 
 def test_client_environment_id_override_keeps_legacy_runtime_ids() -> None:

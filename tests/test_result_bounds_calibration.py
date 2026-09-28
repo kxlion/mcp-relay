@@ -22,40 +22,18 @@ from mcp_relay.client import ClientSettings, RelayClient
 from mcp_relay.json_bounds import MAX_TOOL_RESULT_BYTES
 
 
-class _EchoCapability:
-    tools = frozenset({"sample.echo"})
+class _Flood:
+    async def call_tool(self, tool_name: str, arguments: dict) -> object:
+        from mcp_relay.providers.base import bounded_result
 
-    def __init__(self) -> None:
-        self.unavailable = asyncio.Event()
-
-    async def start(self) -> None:
-        return None
-
-    async def list_tools(self):
-        from mcp_relay.provider_tools import ProviderToolDescriptor
-
-        return [
-            ProviderToolDescriptor(
-                provider_name="sample",
-                tool_name="echo",
-                description="d",
-                input_schema={
-                    "type": "object",
-                    "properties": {"size": {"type": "integer"}},
-                    "additionalProperties": False,
-                },
-            )
-        ]
-
-    async def invoke(self, message):
-        size = message.arguments["size"]
-        return {"content": [{"type": "text", "text": "x" * size}]}
-
-    async def wait_unavailable(self) -> None:
-        await self.unavailable.wait()
+        return bounded_result({"content": [{"type": "text", "text": "x" * arguments["size"]}]})
 
 
 def _run_with_size(tmp_path: Path, size: int) -> dict[str, object]:
+    from mcp_relay.mcp_catalog import AliasCatalog, ClientCatalog
+    from mcp_relay.protocol import RELAY_CONTRACT
+    from mcp_relay.provider_tools import ProviderToolDescriptor
+
     socket = _Socket(
         [
             json.dumps(
@@ -64,7 +42,7 @@ def _run_with_size(tmp_path: Path, size: int) -> dict[str, object]:
                     "type": "registered",
                     "client_id": "d",
                     "server_version": "0.1.0",
-                    "relay_contract": 1,
+                    "relay_contract": RELAY_CONTRACT,
                 }
             ),
             json.dumps(
@@ -72,14 +50,34 @@ def _run_with_size(tmp_path: Path, size: int) -> dict[str, object]:
                     "version": 2,
                     "type": "invoke",
                     "request_id": "r",
-                    "tool_name": "sample.echo",
-                    "arguments": {"size": size},
+                    "tool_name": "mcp.command",
+                    "arguments": {"alias": "sample", "tool": "echo", "arguments": {"size": size}},
                 }
             ),
         ]
     )
 
     async def scenario() -> None:
+        catalog = ClientCatalog()
+        catalog.update_alias(
+            AliasCatalog(
+                alias="sample",
+                enabled=True,
+                runtime_state="running",
+                transport="stdio",
+                catalog_available=True,
+                error=None,
+                descriptors=(
+                    ProviderToolDescriptor(
+                        provider_name="sample",
+                        tool_name="echo",
+                        description="d",
+                        input_schema={"type": "object"},
+                    ),
+                ),
+                provider=_Flood(),
+            )
+        )
         client = RelayClient(
             ClientSettings(
                 server_url="ws://localhost/ws",
@@ -87,13 +85,13 @@ def _run_with_size(tmp_path: Path, size: int) -> dict[str, object]:
                 client_token='client-synthetic-credential-0000000000000000',
                 workspace=tmp_path,
             ),
-            capabilities=[_EchoCapability()],
+            catalog=catalog,
         )
         task = asyncio.create_task(client.run_session(socket))
-        for _ in range(500):
+        for _ in range(2000):
             if any(item.get("type") in {"result", "error"} for item in socket.sent):
                 break
-            await asyncio.sleep(0.001)
+            await asyncio.sleep(0.002)
         client.stop()
         await task
 

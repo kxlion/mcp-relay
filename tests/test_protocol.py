@@ -7,9 +7,9 @@ from pydantic import ValidationError
 
 from mcp_relay.json_bounds import MAX_TOOL_RESULT_BYTES
 from mcp_relay.protocol import (
-    MAX_CAPABILITIES,
     RELAY_CONTRACT,
     Capabilities,
+    Catalog,
     ClientError,
     ClientResult,
     InvokeMessage,
@@ -85,7 +85,7 @@ def test_parses_strict_versioned_token_free_register() -> None:
         "version": 1,
         "type": "register",
         "client_id": "client-a",
-        "relay_contract": 1,
+        "relay_contract": RELAY_CONTRACT,
     }
     assert "token" not in repr(message)
     assert "secret" not in str(message)
@@ -281,7 +281,7 @@ def test_register_frame_has_no_credential_field_or_secret_repr() -> None:
         "version": 1,
         "type": "register",
         "client_id": "client-a",
-        "relay_contract": 1,
+        "relay_contract": RELAY_CONTRACT,
     }
     assert "secret" not in repr(message)
     assert "token" not in json.dumps(message.model_dump(mode="json"))
@@ -307,14 +307,6 @@ def test_protocol_rejects_register_frame_credentials_and_bounds_client_payloads(
             type="register",
             client_id="client-a",
             token="secret",  # type: ignore[call-arg]
-        )
-    with pytest.raises(ValidationError):
-        Capabilities(
-            version=1,
-            type="capabilities",
-            tools=["sample.ping"] * (MAX_CAPABILITIES + 1),
-            relay_contract=RELAY_CONTRACT,
-            client_version="0.2.0",
         )
     with pytest.raises(ValidationError):
         ClientResult(
@@ -418,7 +410,7 @@ def test_capabilities_frame_carries_bounded_client_version() -> None:
     capabilities = Capabilities(
         version=1,
         type="capabilities",
-        tools=["sample.ping"],
+        admin=False,
         relay_contract=RELAY_CONTRACT,
         client_version="0.2.0",
     )
@@ -427,7 +419,7 @@ def test_capabilities_frame_carries_bounded_client_version() -> None:
     fallback = Capabilities(
         version=1,
         type="capabilities",
-        tools=["sample.ping"],
+        admin=False,
         relay_contract=RELAY_CONTRACT,
         client_version="unknown",
     )
@@ -453,20 +445,20 @@ def test_capabilities_version_metadata_is_bounded_and_version_safe(
         Capabilities(
             version=1,
             type="capabilities",
-            tools=["sample.ping"],
+            admin=False,
             relay_contract=RELAY_CONTRACT,
             client_version=version_value,
         )
 
 
-def test_handshake_frames_require_relay_contract_one() -> None:
+def test_handshake_frames_carry_the_current_relay_contract() -> None:
     register = Register(
         version=1,
         type="register",
         client_id="client-a",
         relay_contract=RELAY_CONTRACT,
     )
-    assert register.relay_contract == 1
+    assert register.relay_contract == RELAY_CONTRACT
     registered = parse_server_message(
         {
             "version": 1,
@@ -477,15 +469,15 @@ def test_handshake_frames_require_relay_contract_one() -> None:
         }
     )
     assert isinstance(registered, Registered)
-    assert registered.relay_contract == 1
+    assert registered.relay_contract == RELAY_CONTRACT
     capabilities = Capabilities(
         version=1,
         type="capabilities",
-        tools=["client.status"],
+        admin=False,
         relay_contract=RELAY_CONTRACT,
         client_version="0.2.0",
     )
-    assert capabilities.relay_contract == 1
+    assert capabilities.relay_contract == RELAY_CONTRACT
     # The relay contract is its own mandatory wire field, separate from the
     # protocol ``version`` and from the package ``client_version``/``server_version``.
     assert capabilities.version == 1
@@ -499,13 +491,12 @@ def test_handshake_frames_require_relay_contract_one() -> None:
     ("relay_contract", "reason"),
     [
         (None, "absent field"),
-        (2, "newer contract"),
-        (0, "stale contract"),
-        ("1", "non-strict integer"),
+        ("2", "non-strict integer"),
         (True, "boolean masquerading as integer"),
+        (-1, "negative contract"),
     ],
 )
-def test_frames_reject_missing_or_incompatible_relay_contract(
+def test_frames_reject_missing_or_malformed_relay_contract(
     frame: str, relay_contract: object, reason: str
 ) -> None:
     if frame == "register":
@@ -533,7 +524,7 @@ def test_frames_reject_missing_or_incompatible_relay_contract(
         payload = {
             "version": 1,
             "type": "capabilities",
-            "tools": ["client.status"],
+            "admin": False,
             "client_version": "0.2.0",
         }
         if relay_contract is not None:
@@ -548,8 +539,8 @@ def test_error_detail_carries_bounded_execution_state() -> None:
         type="error",
         request_id="request",
         error={
-            "code": "catalog_stale",
-            "message": "catalog revision was replaced",
+            "code": "tool_unknown",
+            "message": "no such tool",
             "execution_state": "not_started",
         },
     )
@@ -595,3 +586,39 @@ def test_error_detail_rejects_unknown_execution_states(
                 "execution_state": execution_state,  # type: ignore[dict-item]
             },
         )
+
+
+def _catalog_tool(name: str = "fs__read", **overrides: object) -> dict[str, object]:
+    return {
+        "name": name,
+        "alias": "fs",
+        "tool": "read",
+        "input_schema": {"type": "object"},
+        **overrides,
+    }
+
+
+def test_catalog_frame_is_an_application_frame() -> None:
+    message = parse_client_message(
+        {"version": 2, "type": "catalog", "tools": [_catalog_tool()]}
+    )
+    assert isinstance(message, Catalog)
+    assert message.tools[0].tool == "read"
+    with pytest.raises(ValueError):
+        parse_client_message({"version": 1, "type": "catalog", "tools": []})
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        [_catalog_tool(), _catalog_tool()],
+        [_catalog_tool("fs.read")],
+        [_catalog_tool("x" * 65)],
+        [_catalog_tool(alias="FS")],
+        [_catalog_tool(input_schema=[])],
+        [_catalog_tool(handler="x")],
+    ],
+)
+def test_catalog_frame_rejects_ambiguous_or_unportable_entries(tools: list[object]) -> None:
+    with pytest.raises(ValidationError):
+        parse_client_message({"version": 2, "type": "catalog", "tools": tools})

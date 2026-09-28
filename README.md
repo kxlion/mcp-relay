@@ -49,10 +49,11 @@ flowchart LR
 - **Relay Server** routes requests between the AI agent and your computer.
 - **Relay Client** connects your local MCP servers under names you choose.
 
-Your AI discovers the available servers and tools through `relay_mcp_list`,
-then uses `relay_mcp_command` to call them. The remote endpoint exposes a fixed
-set of 10 Relay tools; third-party tools are discovered through those tools
-rather than appearing individually in the AI client's tool list.
+The tools of your local MCP servers appear directly in your AI's tool list,
+named `<alias>__<tool>` (for example `localtools__read_file`), and the list
+updates itself when servers start, stop or change. `relay_status` reports the
+state of the whole chain. You can restrict each server to the tools you want
+your AI to see.
 
 You can also let your AI manage the configured servers by explicitly enabling
 administration on the local Client. This is optional and disabled unless you
@@ -197,8 +198,9 @@ mcp_servers:
 
 Replace that URL with your server's address. For a server launched as a local
 process, use `command` with its executable and arguments instead of `url`.
-Registry-based declarations use `source`. See the [server configuration reference](docs/tools.md)
-for the entry formats and per-server credentials.
+Registry-based declarations use `source`. Add `tools:` to publish only some of
+a server's tools. See the [server configuration reference](docs/tools.md) for
+the entry formats and per-server credentials.
 
 You choose and configure the underlying MCP servers separately; Relay does not
 supply browser, desktop or terminal tools of its own.
@@ -238,19 +240,18 @@ mcp_servers:
 
 Ask your AI agent to:
 
-> Check my connection with `relay_client_status`, then use `relay_mcp_list`
-> to discover the MCP servers and tools available on my computer.
+> Call `relay_status` and tell me which MCP servers and tools are available on
+> my computer.
 
-A successful Client status call checks the round trip to your computer.
-To use a discovered tool, the AI calls `relay_mcp_command` with the
-`catalog_revision` returned by discovery. See the [tool guide](docs/tools.md)
-for the full request formats.
+A `live` Client report confirms the round trip to your computer. Your servers'
+tools are then called like any other MCP tool. See the
+[tool guide](docs/tools.md) for naming, filtering and error handling.
 
 ## Choose whether your AI can manage servers
 
-Discovery and tool execution are available for your configured, enabled servers.
-Adding, modifying, deleting, enabling or disabling server entries remotely
-requires explicit permission on your local Client:
+Your configured, enabled servers' tools are always available. Adding,
+modifying, deleting, enabling or disabling server entries remotely requires
+explicit permission on your local Client:
 
 ```sh
 mcp-relay config set admin true
@@ -262,7 +263,8 @@ Restart the Client to apply the change. To lock administration again:
 mcp-relay config unset admin
 ```
 
-Restart once more. This setting controls server administration, not the actions
+Restart once more. Without it, the administration tools are not listed. This
+setting controls server administration, not the actions
 of tools exposed by your MCP servers. Configure those servers' permissions
 accordingly. Third-party results are relayed without scanning them for secrets.
 

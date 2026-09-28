@@ -10,6 +10,7 @@ from mcp_relay.output_models import ProviderToolResult
 from mcp_relay.protocol import (
     RELAY_CONTRACT,
     Capabilities,
+    Catalog,
     ClientError,
     ClientResult,
     InvokeMessage,
@@ -27,7 +28,6 @@ from mcp_relay.registry import (
     RelayRegistry,
     RemoteClientError,
     UnknownRequestError,
-    UnsupportedToolError,
 )
 from mcp_relay.version import package_version
 
@@ -114,16 +114,17 @@ def declare_ping(registry: RelayRegistry, socket: FakeSocket) -> None:
                 version=1,
                 type="capabilities",
                 relay_contract=RELAY_CONTRACT,
-                tools=["sample.ping"],
+                admin=False,
                 client_version="0.2.0",
             ),
         )
     )
 
 
-def test_registry_retains_the_client_announcement() -> None:
-    """The registry keeps the announced wire operations; no descriptors flow."""
+def test_registry_keeps_the_catalog_until_disconnect_and_signals_changes() -> None:
     registry = RelayRegistry(client_id="one", client_token="client-token")
+    changes: list[str] = []
+    registry.set_surface_listener(lambda: changes.append("changed"))
     socket = FakeSocket()
     register(registry, socket)
     run(
@@ -133,14 +134,24 @@ def test_registry_retains_the_client_announcement() -> None:
                 version=1,
                 type="capabilities",
                 relay_contract=RELAY_CONTRACT,
-                tools=["mcp.list", "mcp.command"],
+                admin=True,
                 client_version="0.2.0",
             ),
         )
     )
+    tool = {"name": "fs__read", "alias": "fs", "tool": "read", "input_schema": {"type": "object"}}
+    run(registry.set_catalog(socket, Catalog(version=2, type="catalog", tools=[tool])))
 
-    assert registry.announced_capabilities == frozenset({"mcp.list", "mcp.command"})
-    assert not hasattr(registry, "announced_descriptors")
+    assert registry.client_admin is True
+    assert [entry.name for entry in registry.catalog] == ["fs__read"]
+    assert registry.catalog_tool("fs__read").tool == "read"
+    assert run(registry.status_snapshot()).published_tools == 1
+
+    run(registry.disconnect(socket))
+    assert registry.catalog == ()
+    assert registry.client_admin is False
+    assert registry.catalog_tool("fs__read") is None
+    assert changes == ["changed", "changed", "changed"]
 
 
 def ping(request_id: str) -> InvokeMessage:
@@ -193,7 +204,7 @@ def test_registry_relays_bounded_arguments_without_schema_validation() -> None:
                 version=1,
                 type="capabilities",
                 relay_contract=RELAY_CONTRACT,
-                tools=["mcp.command"],
+                admin=False,
                 client_version="0.2.0",
             ),
         )
@@ -224,7 +235,7 @@ def test_registry_serializes_generic_v2_and_returns_provider_result() -> None:
             Capabilities(
                 version=1,
                 type="capabilities",
-                tools=["sample.ping"],
+                admin=False,
                 relay_contract=RELAY_CONTRACT,
                 client_version="0.2.0",
             ),
@@ -255,8 +266,7 @@ def test_registry_serializes_generic_v2_and_returns_provider_result() -> None:
             ClientResult(version=2, type="result", request_id="generic", result=expected)
         )
         delivered = await pending
-        # Tranche 4: the registry delivers the NATIVE MCP result (once),
-        # not the bounded wire mirror.
+        # The registry delivers the native MCP result, not the wire mirror.
         from mcp.types import CallToolResult  # noqa: PLC0415
 
         assert isinstance(delivered, CallToolResult)
@@ -274,7 +284,7 @@ def test_status_snapshot_is_safe_and_offline() -> None:
 
     assert snapshot.client_id == "one"
     assert snapshot.connected is False
-    assert snapshot.capabilities == ()
+    assert snapshot.admin is False
     assert snapshot.invocation_state == "idle"
     assert snapshot.progress is None
     assert snapshot.heartbeat_age_seconds is None
@@ -292,7 +302,7 @@ def test_status_snapshot_atomically_copies_connected_state() -> None:
                 version=1,
                 type="capabilities",
                 relay_contract=RELAY_CONTRACT,
-                tools=["sample.exec", "sample.ping"],
+                admin=False,
                 client_version="0.2.0",
             ),
         )
@@ -302,7 +312,7 @@ def test_status_snapshot_atomically_copies_connected_state() -> None:
 
     assert snapshot.client_id == "one"
     assert snapshot.connected is True
-    assert snapshot.capabilities == ("sample.exec", "sample.ping")
+    assert snapshot.admin is False
     assert snapshot.invocation_state == "idle"
     assert snapshot.progress is None
     assert snapshot.heartbeat_age_seconds is not None
@@ -312,7 +322,7 @@ def test_status_snapshot_atomically_copies_connected_state() -> None:
     assert set(vars(snapshot)) == {
         "client_id",
         "connected",
-        "capabilities",
+        "admin",
         "invocation_state",
         "progress",
         "heartbeat_age_seconds",
@@ -320,8 +330,7 @@ def test_status_snapshot_atomically_copies_connected_state() -> None:
         "connected_since",
         "last_disconnect_at",
         "last_disconnect_reason",
-        "public_tools",
-        "client_operations",
+        "published_tools",
     }
 
 
@@ -336,7 +345,7 @@ def test_status_snapshot_reports_client_version() -> None:
                 version=1,
                 type="capabilities",
                 relay_contract=RELAY_CONTRACT,
-                tools=["sample.ping"],
+                admin=False,
                 client_version="0.2.0",
             ),
         )
@@ -361,7 +370,7 @@ def test_status_snapshot_captures_busy_progress_under_registry_lock() -> None:
             Capabilities(
                 version=1,
                 type="capabilities",
-                tools=["sample.ping"],
+                admin=False,
                 relay_contract=RELAY_CONTRACT,
                 client_version="0.2.0",
             ),
@@ -418,7 +427,7 @@ def test_registry_starts_offline_without_a_preconfigured_client_identity() -> No
 
     assert snapshot.client_id is None
     assert snapshot.connected is False
-    assert snapshot.capabilities == ()
+    assert snapshot.admin is False
 
 
 def test_registry_binds_first_identity_and_rejects_a_different_identity() -> None:
@@ -439,15 +448,10 @@ def test_registry_binds_first_identity_and_rejects_a_different_identity() -> Non
         run(registry.register(second_socket, second))
 
 
-def test_every_tool_requires_a_declared_capability() -> None:
+def test_invoke_sends_one_frame_and_resolves_its_result() -> None:
     registry = RelayRegistry(client_id="one", client_token="client-token")
     socket = FakeSocket()
     register(registry, socket)
-
-    with pytest.raises(UnsupportedToolError, match="sample.ping"):
-        run(registry.invoke("one", ping("ping"), 1))
-    with pytest.raises(UnsupportedToolError, match="sample.exec"):
-        run(registry.invoke("one", terminal("a"), 1))
 
     run(
         registry.set_capabilities(
@@ -456,7 +460,7 @@ def test_every_tool_requires_a_declared_capability() -> None:
                 version=1,
                 type="capabilities",
                 relay_contract=RELAY_CONTRACT,
-                tools=["sample.ping", "sample.exec"],
+                admin=False,
                 client_version="0.2.0",
             ),
         )
@@ -902,7 +906,7 @@ def test_register_defaults_to_installed_package_version() -> None:
 
 
 # --------------------------------------------------------------------------
-# Phase 3: connection windows and hub counts for the enriched status tool
+# Connection windows reported in the status snapshot
 # --------------------------------------------------------------------------
 
 
@@ -928,7 +932,7 @@ def test_status_snapshot_tracks_connection_windows() -> None:
             Capabilities(
                 version=1,
                 type="capabilities",
-                tools=["sample.ping"],
+                admin=False,
                 relay_contract=RELAY_CONTRACT,
                 client_version="0.2.0",
             ),
@@ -946,41 +950,6 @@ def test_status_snapshot_tracks_connection_windows() -> None:
         assert offline.last_disconnect_reason == "closed:1000"
 
     asyncio.run(scenario())
-
-
-def test_status_snapshot_counts_public_tools_and_client_operations() -> None:
-    registry = RelayRegistry(client_id="one", client_token="client-token")
-    socket = FakeSocket()
-    register(registry, socket)
-    registry.set_public_tools_count(10)
-    run(
-        registry.set_capabilities(
-            socket,
-            Capabilities(
-                version=1,
-                type="capabilities",
-                relay_contract=RELAY_CONTRACT,
-                tools=["client.status", "mcp.list", "mcp.command", "mcp.add", "mcp.modify", "mcp.delete", "mcp.enable", "mcp.disable"],
-                client_version="0.2.0",
-            ),
-        )
-    )
-
-    snapshot = run(registry.status_snapshot())
-
-    assert snapshot.public_tools == 10
-    assert snapshot.client_operations == 8
-
-
-def test_status_snapshot_reports_zero_client_operations_without_client() -> None:
-    registry = RelayRegistry(client_id="one", client_token="client-token")
-    registry.set_public_tools_count(11)
-
-    snapshot = run(registry.status_snapshot())
-
-    assert snapshot.connected is False
-    assert snapshot.public_tools == 11
-    assert snapshot.client_operations == 0
 
 
 def test_disconnect_reason_is_bounded() -> None:
@@ -1019,7 +988,7 @@ def test_progress_listener_receives_in_flight_progress_frames() -> None:
                 version=1,
                 type="capabilities",
                 relay_contract=RELAY_CONTRACT,
-                tools=["mcp.list"],
+                admin=False,
                 client_version="0.2.0",
             ),
         )
@@ -1074,7 +1043,7 @@ def test_progress_listener_failure_does_not_break_progress_accounting() -> None:
                 version=1,
                 type="capabilities",
                 relay_contract=RELAY_CONTRACT,
-                tools=["mcp.list"],
+                admin=False,
                 client_version="0.2.0",
             ),
         )

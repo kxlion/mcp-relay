@@ -26,7 +26,8 @@ from mcp.client.streamable_http import streamable_http_client
 import mcp_relay.server as server_module
 from mcp_relay.client import ClientSettings, RelayClient
 from mcp_relay.config import ConfigError, load_server_runtime
-from mcp_relay.protocol import InvokeMessage
+from mcp_relay.mcp_catalog import AliasCatalog, ClientCatalog
+from mcp_relay.output_models import ProviderToolResult
 from mcp_relay.provider_tools import ProviderToolDescriptor
 from mcp_relay.server import RelaySettings
 
@@ -414,50 +415,51 @@ def test_both_server_failures_are_reported_after_draining(
     asyncio.run(scenario())
 
 
-class _RuntimeStatusCapability:
-    """Synthetic published operation with observable request correlation."""
-
-    tools = frozenset({"client.status"})
+class _ProbeProvider:
+    """Route provider for the ``probe`` alias, observable and optionally blocking."""
 
     def __init__(self, *, block: bool = False) -> None:
         self.started = asyncio.Event()
         self.cancelled = asyncio.Event()
-        self.request_ids: list[str] = []
+        self.calls: list[str] = []
         self._block = block
 
-    async def start(self) -> None:
-        return None
-
-    async def list_tools(self) -> list[ProviderToolDescriptor]:
-        return [
-            ProviderToolDescriptor(
-                provider_name="client",
-                tool_name="status",
-                description="Dual-listener runtime probe",
-                input_schema={
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            )
-        ]
-
-    async def invoke(self, message: InvokeMessage) -> dict[str, object]:
-        self.request_ids.append(message.request_id)
+    async def call_tool(self, name: str, arguments: dict[str, object]) -> ProviderToolResult:
+        self.calls.append(name)
         self.started.set()
         try:
             if self._block:
                 await asyncio.Event().wait()
-            return {"probe": "through-both-listeners"}
+            return ProviderToolResult(
+                content=[], structuredContent={"probe": "through-both-listeners"}
+            )
         except asyncio.CancelledError:
             self.cancelled.set()
             raise
 
-    async def wait_unavailable(self) -> None:
-        await asyncio.Event().wait()
 
-    async def aclose(self) -> None:
-        return None
+def _probe_catalog(provider: _ProbeProvider) -> ClientCatalog:
+    catalog = ClientCatalog()
+    catalog.update_alias(
+        AliasCatalog(
+            alias="probe",
+            enabled=True,
+            runtime_state="running",
+            transport="stdio",
+            catalog_available=True,
+            error=None,
+            descriptors=(
+                ProviderToolDescriptor(
+                    provider_name="probe",
+                    tool_name="status",
+                    description="Dual-listener runtime probe",
+                    input_schema={"type": "object"},
+                ),
+            ),
+            provider=provider,
+        )
+    )
+    return catalog
 
 
 async def _wait_until(
@@ -717,7 +719,7 @@ def test_real_dual_listener_runtime_relays_on_exact_reserved_ports(
 ) -> None:
     async def scenario() -> None:
         mcp_port, client_port = _candidate_ports()
-        capability = _RuntimeStatusCapability()
+        capability = _ProbeProvider()
         listener_apps: list[tuple[FastAPI, FastAPI]] = []
         runtime_servers: list[uvicorn.Server] = []
         reserved_sockets: list[socket.socket] = []
@@ -773,14 +775,14 @@ def test_real_dual_listener_runtime_relays_on_exact_reserved_ports(
                 client_token='client-secret-synthetic-credential-0000000000000000',
                 workspace=tmp_path,
             ),
-            capabilities=[capability],
+            catalog=_probe_catalog(capability),
         )
         client_task = asyncio.create_task(client.run(), name="test-relay-client")
         try:
             await _wait_until(
                 lambda: bool(listener_apps)
-                and "client.status"
-                in listener_apps[0][0].state.registry.announced_capabilities
+                and listener_apps[0][0].state.registry.catalog_tool("probe__status")
+                is not None
             )
             mcp_app, client_app = listener_apps[0]
             registry = mcp_app.state.registry
@@ -804,8 +806,8 @@ def test_real_dual_listener_runtime_relays_on_exact_reserved_ports(
                     async with ClientSession(read_stream, write_stream) as session:
                         await session.initialize()
                         published = {tool.name for tool in (await session.list_tools()).tools}
-                        assert "relay_client_status" in published
-                        result = await session.call_tool("relay_client_status", {})
+                        assert "probe__status" in published
+                        result = await session.call_tool("probe__status", {})
 
             assert result.is_error is False
             payload = result.structured_content
@@ -814,13 +816,12 @@ def test_real_dual_listener_runtime_relays_on_exact_reserved_ports(
             if "structuredContent" in payload:
                 payload = payload["structuredContent"]
             assert payload == {"probe": "through-both-listeners"}
-            assert len(capability.request_ids) == 1
-            request_id = capability.request_ids[0]
-            assert request_id in registry._recently_completed
+            assert capability.calls == ["status"]
+            assert len(registry._recently_completed) == 1
             assert registry.pending_count == 0
             snapshot = await registry.status_snapshot()
             assert snapshot.connected is True
-            assert "client.status" in snapshot.capabilities
+            assert snapshot.published_tools == 1
         finally:
             client.stop()
             with contextlib.suppress(asyncio.TimeoutError):
@@ -1053,7 +1054,7 @@ def test_listener_failure_cancels_inflight_call_and_cleans_runtime(
 
     async def scenario() -> None:
         mcp_port, client_port = _candidate_ports()
-        capability = _RuntimeStatusCapability(block=True)
+        capability = _ProbeProvider(block=True)
         original_client_server = server_module._SignalFreeUvicornServer
         original_pair = server_module._serve_uvicorn_pair
         runtime_servers: list[uvicorn.Server] = []
@@ -1122,7 +1123,7 @@ def test_listener_failure_cancels_inflight_call_and_cleans_runtime(
                 client_token='client-secret-synthetic-credential-0000000000000000',
                 workspace=tmp_path,
             ),
-            capabilities=[capability],
+            catalog=_probe_catalog(capability),
         )
         client_task = asyncio.create_task(client.run(), name="test-blocked-relay-client")
 
@@ -1136,7 +1137,7 @@ def test_listener_failure_cancels_inflight_call_and_cleans_runtime(
                 ) as (read_stream, write_stream):
                     async with ClientSession(read_stream, write_stream) as session:
                         await session.initialize()
-                        return await session.call_tool("relay_client_status", {})
+                        return await session.call_tool("probe__status", {})
 
         call_task: asyncio.Task[object] | None = None
         outcome: object | BaseException | None = None
@@ -1145,9 +1146,10 @@ def test_listener_failure_cancels_inflight_call_and_cleans_runtime(
                 lambda: bool(runtime_servers)
                 and runtime_servers[0].started
                 and runtime_servers[1].started
-                and "client.status"
-                in runtime_servers[0]
-                .config.app.state.registry.announced_capabilities
+                and runtime_servers[0].config.app.state.registry.catalog_tool(
+                    "probe__status"
+                )
+                is not None
             )
             call_task = asyncio.create_task(
                 call_status(), name="test-inflight-mcp-call"
@@ -1174,7 +1176,7 @@ def test_listener_failure_cancels_inflight_call_and_cleans_runtime(
         assert not isinstance(outcome, TimeoutError)
         assert isinstance(outcome, BaseException) or getattr(outcome, "is_error") is True
         assert call_task is not None and call_task.done()
-        assert capability.request_ids
+        assert capability.calls
         assert capability.cancelled.is_set()
         assert all(task.done() for task in inner_client_tasks)
         assert all(not instance.server_state.connections for instance in runtime_servers)
