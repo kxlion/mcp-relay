@@ -22,11 +22,10 @@ MCP client -> /mcp -> Relay Server -> authenticated WebSocket
 ```
 
 Local MCP servers are aggregated behind a single remote MCP facade under
-user-configured aliases. No third-party tool is ever published individually:
-the only paths to a third-party tool are discovery (`relay_mcp_list`) and
-execution (`relay_mcp_command`). The relay forwards messages without
-functional interpretation and preserves request identifiers and
-correlations.
+user-configured aliases. Their tools are published as native MCP tools named
+`<alias>__<tool>`, optionally restricted by the entry's `tools:` allowlist.
+The relay forwards messages without functional interpretation and preserves
+request identifiers and correlations.
 
 ## Sources of truth
 
@@ -90,9 +89,12 @@ git diff --check
 
 ## Security considerations
 
-- Keep relayed capabilities explicit and bounded: the facade exposes the fixed
-  `relay_*` surface only (10 tools); third-party tools are reached through
-  `relay_mcp_list` and `relay_mcp_command`, never published individually.
+- Keep relayed capabilities explicit and bounded: the facade publishes
+  `relay_status`, `relay_registry_search`, the five administration tools only
+  when the Client has `admin: true`, and the Client's bounded catalog. A call
+  reaches a third-party tool only if it is in the published catalog.
+- Server and Client share one relay contract; a wire change bumps
+  `RELAY_CONTRACT` and both sides are upgraded together.
 - Preserve authentication, authorization boundaries, input validation, bounded
   outputs, timeouts, cancellation, and cleanup when changing those areas.
 - Tokens (Relay Client Token, public MCP access token) never appear in the

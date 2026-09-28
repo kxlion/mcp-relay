@@ -129,13 +129,11 @@ mcp-relay client
 ```
 
 Keep both processes running. Use `Ctrl+C` in the corresponding terminal to stop
-one. After editing Client YAML, restart the Client. The live
-`relay_client_status` MCP tool reports `disk_differs` when alias settings on disk
-have diverged from runtime.
+one. After editing Client YAML, restart the Client. The `relay_status` MCP tool
+reports `disk_differs` when alias settings on disk have diverged from runtime.
 
-For a live connection check, ask your AI to call `relay_server_status`, then
-`relay_client_status`. The first reports the Server's view; the second makes a
-round trip to the Client.
+For a live connection check, ask your AI to call `relay_status`. It reports the
+Server's view and, when the Client answers, a `live` report of its MCP servers.
 
 ## Change Client settings
 
@@ -153,8 +151,8 @@ mcp-relay config unset admin
 ```
 
 Restart again. This switch gates adding, modifying, deleting, enabling and
-disabling server aliases. It does not gate discovery or calls to tools of
-configured servers. See [administration](tools.md#manage-servers) for those tools.
+disabling server aliases; without it those tools are not listed. It does not
+gate calls to tools of configured servers. See [administration](tools.md#manage-servers) for those tools.
 
 `get`, `set` and `unset` take Client keys directly, without a role prefix.
 Server listeners and Relay tokens are supplied through environment or `.env`.
@@ -187,9 +185,9 @@ copied into the log. Third-party result content is not secret-scanned by Relay.
 | AI cannot reach `/mcp` | Check the MCP token and proxy route to the MCP listener |
 | Configuration changes have no effect | Inspect `config show` for environment overrides and restart the Client after YAML edits |
 | `permission_denied` on administration | Explicitly set `admin: true` locally and restart, if administration is intended |
-| One MCP server is unavailable | Inspect `relay_mcp_list` and `client.log`; check that server's launcher, credentials and dependencies |
+| One MCP server is unavailable | Inspect `relay_status` and `client.log`; check that server's launcher, credentials and dependencies |
 
-For stale catalogs, timeouts and uncertain tool execution, see
+For missing tools, timeouts and uncertain tool execution, see
 [tool errors](tools.md#errors-and-recovery).
 
 ## Remove the installation

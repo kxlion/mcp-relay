@@ -23,15 +23,14 @@ MIN_TOKEN_LENGTH = 32
 MAX_TOKEN_LENGTH = 256
 # Credential ASCII must also be usable verbatim as an HTTP Bearer credential.
 TOKEN_PATTERN = r"^[\x21-\x7e]+$"
-MAX_CAPABILITIES = 128
 MAX_ERROR_MESSAGE_LENGTH = 512
 MAX_PROGRESS_MESSAGE_LENGTH = 512
-RELAY_CONTRACT: Final = 1
-# Strict wire type for the relay contract field: exactly the integer 1, never
-# a bool or numeric string, never absent.
-RelayContract = Annotated[
-    int, Field(strict=True, ge=RELAY_CONTRACT, le=RELAY_CONTRACT)
-]
+MAX_CATALOG_TOOLS = 4096
+MAX_PUBLIC_TOOL_NAME_LENGTH = 64
+RELAY_CONTRACT: Final = 2
+# Strict integer, never a bool or numeric string, never absent. Its value is
+# compared explicitly so a mismatch closes as ``protocol_incompatible``.
+RelayContract = Annotated[int, Field(strict=True, ge=0)]
 
 RequestId = Annotated[
     str,
@@ -54,11 +53,32 @@ VERSION_LABEL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9.+_-]*$"
 VersionLabel = Annotated[
     str, Field(min_length=1, max_length=64, pattern=VERSION_LABEL_PATTERN)
 ]
+# Public tool names use the subset every major MCP host accepts.
+PublicToolName = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=MAX_PUBLIC_TOOL_NAME_LENGTH,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    ),
+]
+AliasName = Annotated[str, Field(min_length=1, max_length=16, pattern=r"^[a-z]+$")]
+
+#: Operations the Server may invoke on the Client.
+OP_CLIENT_STATUS = "client.status"
+OP_MCP_COMMAND = "mcp.command"
+OP_MCP_ADD = "mcp.add"
+OP_MCP_MODIFY = "mcp.modify"
+OP_MCP_DELETE = "mcp.delete"
+OP_MCP_ENABLE = "mcp.enable"
+OP_MCP_DISABLE = "mcp.disable"
+ADMIN_OPERATIONS = frozenset(
+    {OP_MCP_ADD, OP_MCP_MODIFY, OP_MCP_DELETE, OP_MCP_ENABLE, OP_MCP_DISABLE}
+)
 
 # Imported after the bounded frame primitives to keep the provider result model
 # independent from the protocol module's application-frame definitions.
 from .output_models import ProviderToolResult  # noqa: E402
-from .provider_tools import ProviderToolDescriptor  # noqa: E402,F401
 
 
 class Message(BaseModel):
@@ -73,27 +93,22 @@ class Message(BaseModel):
 class Register(Message):
     type: Literal["register"]
     client_id: ClientId
-    # Explicit Server-Client relay contract, separate from the protocol
-    # ``version`` field's role (handshake v1, application frames v2) and from
-    # the package version metadata. Exactly 1 is accepted; an absent or other
-    # value is a protocol incompatibility, never negotiable.
+    # Server-Client relay contract, separate from the frame ``version`` and
+    # from package versions. Any other value is incompatible, never negotiated.
     relay_contract: RelayContract
 
 
 class Capabilities(Message):
-    """Capability announcement sent after authentication.
+    """Client metadata sent once after registration.
 
-    ``tools`` carries exactly the fixed Relay wire operations shared by
-    Server and Client code — never third-party descriptors or schemas, and
-    independent of the Client's admin setting. ``client_version`` is the
-    Client's installed package version, bounded by :data:`VersionLabel`.
-    Unresolvable metadata is announced as ``unknown`` instead of invented.
+    ``admin`` is the local administration switch, read once at Client start;
+    the Server only uses it to decide whether to list the admin tools.
     """
 
     type: Literal["capabilities"]
-    tools: list[ToolName] = Field(min_length=0, max_length=MAX_CAPABILITIES)
     relay_contract: RelayContract
     client_version: VersionLabel
+    admin: bool
 
 
 class ApplicationMessage(BaseModel):
@@ -107,6 +122,34 @@ class ApplicationMessage(BaseModel):
 
 class Heartbeat(ApplicationMessage):
     type: Literal["heartbeat"]
+
+
+class CatalogTool(BaseModel):
+    """One third-party tool as published by the Server's MCP facade."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
+
+    name: PublicToolName
+    alias: AliasName
+    tool: ToolName
+    description: Annotated[str, Field(max_length=2048)] = ""
+    input_schema: JsonObject
+    output_schema: JsonObject | None = None
+    annotations: JsonObject | None = None
+
+
+class Catalog(ApplicationMessage):
+    """The Client's complete publishable tool catalog, replacing the last one."""
+
+    type: Literal["catalog"]
+    tools: list[CatalogTool] = Field(max_length=MAX_CATALOG_TOOLS)
+
+    @model_validator(mode="after")
+    def _unique_names(self) -> Catalog:
+        names = [tool.name for tool in self.tools]
+        if len(set(names)) != len(names):
+            raise ValueError("duplicate public tool name")
+        return self
 
 
 class ClientResult(ApplicationMessage):
@@ -184,7 +227,9 @@ class Cancel(ApplicationMessage):
     reason: Annotated[str, Field(min_length=1, max_length=256)]
 
 
-ClientMessage = Register | Capabilities | Heartbeat | ClientResult | ClientError | Progress
+ClientMessage = (
+    Register | Capabilities | Heartbeat | Catalog | ClientResult | ClientError | Progress
+)
 ServerMessage = Registered | InvokeMessage | Cancel
 
 _client_adapter = TypeAdapter(Annotated[ClientMessage, Field(discriminator="type")])
@@ -194,7 +239,7 @@ def parse_client_message(value: object) -> ClientMessage:
     """Parse one decoded JSON object from a client."""
     if not isinstance(value, dict) or not isinstance(value.get("type"), str):
         raise ValueError("invalid client message")
-    if value["type"] in {"result", "error", "progress"}:
+    if value["type"] in {"catalog", "result", "error", "progress"}:
         if value.get("version") != 2:
             raise ValueError("invalid application message version")
     return _client_adapter.validate_python(value)

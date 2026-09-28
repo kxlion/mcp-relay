@@ -2,9 +2,9 @@
 
 Integration fixture for the CI E2E bench. It boots the real ``mcp-relay
 server`` and ``mcp-relay client`` as subprocesses in an isolated temporary
-home, then — through the authenticated MCP facade — exercises EVERY fixed
-surface command: ``relay_server_status``, ``relay_client_status``,
-``relay_mcp_list``, ``relay_mcp_add`` (the ``fs`` alias), ``relay_mcp_modify``,
+home, then — through the authenticated MCP facade — exercises every Relay
+tool: ``relay_status``,
+``relay_mcp_add`` (the ``fs`` alias), ``relay_mcp_modify``,
 ``relay_mcp_enable``/``relay_mcp_disable`` and ``relay_mcp_delete``, plus a
 real file round trip against ``@modelcontextprotocol/server-filesystem``
 (pinned) spawned via node from a pre-warmed npx cache:
@@ -44,12 +44,9 @@ ALIAS = "fs"
 FS_PACKAGE = "@modelcontextprotocol/server-filesystem"
 FS_VERSION = "2026.8.31"
 REGISTRATION_LINE = "authenticated registration succeeded"
-FIXED_SURFACE = {
-    "relay_server_status",
+RELAY_SURFACE = {
+    "relay_status",
     "relay_registry_search",
-    "relay_client_status",
-    "relay_mcp_list",
-    "relay_mcp_command",
     "relay_mcp_add",
     "relay_mcp_modify",
     "relay_mcp_delete",
@@ -257,6 +254,7 @@ def test_real_filesystem_e2e_bench(tmp_path: pathlib.Path) -> None:
     # added at runtime through relay_mcp_add (admin CRUD proof).
     raw = yaml.safe_load(config_path.read_text())
     assert set(raw) == {"identity", "relay_url", "workspace", "mcp_servers", "admin"}
+    raw["admin"] = True
     raw["relay_url"] = f"ws://127.0.0.1:{client_port}/ws"
     raw["mcp_servers"] = {}
     config_path.write_text(yaml.safe_dump(raw, sort_keys=False))
@@ -314,10 +312,18 @@ def test_real_filesystem_e2e_bench(tmp_path: pathlib.Path) -> None:
                     ) as (read_stream, write_stream):
                         async with ClientSession(read_stream, write_stream) as session:
                             await session.initialize()
-                            tools = await session.list_tools()
-                            names = {tool.name for tool in tools.tools}
-                            assert len(names) == 10, names
-                            assert names == FIXED_SURFACE, names
+                            async def names() -> set[str]:
+                                return {tool.name for tool in (await session.list_tools()).tools}
+
+                            async def wait_for_names(predicate: Any) -> set[str]:
+                                for _ in range(300):
+                                    current = await names()
+                                    if predicate(current):
+                                        return current
+                                    await anyio.sleep(0.1)
+                                raise AssertionError(f"tools never matched: {current}")
+
+                            assert await wait_for_names(lambda n: n == RELAY_SURFACE)
 
                             async def invoke(
                                 tool: str, arguments: dict[str, Any]
@@ -329,58 +335,40 @@ def test_real_filesystem_e2e_bench(tmp_path: pathlib.Path) -> None:
                                     or getattr(result.content[0], "text", None)
                                 )
 
-                            # Control tools before any alias exists.
-                            server_status = await invoke("relay_server_status", {})
-                            assert server_status, server_status
-                            client_status = await invoke("relay_client_status", {})
-                            assert client_status["client"]["protocol"] == 1
+                            status = await invoke("relay_status", {})
+                            assert status["client"]["connected"] is True
+                            assert status["client"]["report"] == "live"
+                            assert status["mcp_servers"] == []
 
-                            listing = await invoke("relay_mcp_list", {})
-                            assert listing["level"] == "servers"
-                            assert listing["items"] == []
-
-                            # relay_mcp_add: declare + start the fs alias.
                             add = await invoke(
                                 "relay_mcp_add",
                                 {"alias": ALIAS, "entry": {"command": fs_command}},
                             )
                             assert add["status"] == "running", add
 
-                            listing = await invoke("relay_mcp_list", {})
-                            assert listing["level"] == "servers"
-                            assert [item["alias"] for item in listing["items"]] == [ALIAS]
-                            assert listing["items"][0]["runtime_state"] == "running"
-                            assert listing["items"][0]["transport"] == "stdio"
-                            assert listing["items"][0]["entry"]["command"] == fs_command
-
-                            # Discovery of the relayed fs_* tools.
-                            tools_listing = await invoke(
-                                "relay_mcp_list", {"alias": ALIAS}
+                            # The fs tools are now native MCP tools of the Relay.
+                            published = await wait_for_names(
+                                lambda n: f"{ALIAS}__read_text_file" in n
                             )
-                            assert tools_listing["level"] == "tools"
-                            tool_names = {
-                                item["name"] for item in tools_listing["items"]
-                            }
                             assert {
-                                "list_directory",
-                                "write_file",
-                                "read_text_file",
-                                "get_file_info",
-                            } <= tool_names, tool_names
-                            revision = tools_listing["catalog_revision"]
+                                f"{ALIAS}__list_directory",
+                                f"{ALIAS}__write_file",
+                                f"{ALIAS}__read_text_file",
+                                f"{ALIAS}__get_file_info",
+                            } <= published, published
+                            status = await invoke("relay_status", {})
+                            [server] = status["mcp_servers"]
+                            assert server["alias"] == ALIAS
+                            assert server["runtime_state"] == "running"
+                            assert server["transport"] == "stdio"
+                            assert server["published_tools"] == len(
+                                [name for name in published if name.startswith(f"{ALIAS}__")]
+                            )
 
                             async def relayed(
                                 tool: str, arguments: dict[str, Any]
                             ) -> Any:
-                                command = await session.call_tool(
-                                    "relay_mcp_command",
-                                    {
-                                        "alias": ALIAS,
-                                        "tool": tool,
-                                        "arguments": arguments,
-                                        "catalog_revision": revision,
-                                    },
-                                )
+                                command = await session.call_tool(f"{ALIAS}__{tool}", arguments)
                                 assert command.is_error is False, f"{tool}: {command}"
                                 payload = _structured(
                                     command.structured_content
@@ -436,24 +424,23 @@ def test_real_filesystem_e2e_bench(tmp_path: pathlib.Path) -> None:
                             assert match is not None, info
                             assert int(match.group(1)) == len(content.encode()), info
 
-                            # relay_mcp_modify: replace the alias entry.
                             modified = await invoke(
                                 "relay_mcp_modify",
                                 {"alias": ALIAS, "entry": {"command": fs_command}},
                             )
                             assert modified["status"] == "running", modified
 
-                            # enable/disable round trip.
                             disabled = await invoke("relay_mcp_disable", {"alias": ALIAS})
                             assert disabled["runtime_state"] == "disabled", disabled
+                            await wait_for_names(lambda n: n == RELAY_SURFACE)
                             enabled = await invoke("relay_mcp_enable", {"alias": ALIAS})
                             assert enabled["runtime_state"] == "running", enabled
+                            await wait_for_names(lambda n: f"{ALIAS}__read_text_file" in n)
 
-                            # relay_mcp_delete with strict existence.
                             deleted = await invoke("relay_mcp_delete", {"alias": ALIAS})
                             assert deleted == {"alias": ALIAS, "status": "deleted"}
-                            listing = await invoke("relay_mcp_list", {})
-                            assert listing["items"] == []
+                            await wait_for_names(lambda n: n == RELAY_SURFACE)
+                            assert (await invoke("relay_status", {}))["mcp_servers"] == []
 
             anyio.run(scenario)
 

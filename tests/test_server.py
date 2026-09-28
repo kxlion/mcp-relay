@@ -18,10 +18,10 @@ import mcp_relay.server as server_module
 from mcp_relay.server import (
     RelaySettings,
     _classify_bind_address,
-    create_app,
     main,
 )
 from mcp_relay.version import package_version
+from tests.composite_app import create_app
 
 
 def settings() -> RelaySettings:
@@ -421,19 +421,6 @@ def test_server_cli_rejects_invalid_configuration_without_echoing_values(
     stderr = capsys.readouterr().err
     assert sentinel not in stderr
 
-    # The legacy combined host/port flags no longer exist on the parser.
-    monkeypatch.setattr(
-        "mcp_relay.server.os.environ",
-        {
-            "RELAY_MCP_TOKEN": 'mcp-secret-synthetic-credential-0000000000000000',
-            "RELAY_CLIENT_TOKEN": 'client-secret-synthetic-credential-0000000000000000',
-        },
-    )
-    with pytest.raises(SystemExit):
-        main(["--host", "0.0.0.0"])
-    stderr = capsys.readouterr().err
-    assert "unrecognized arguments" in stderr
-
 
 def test_mcp_accepts_any_host_and_origin_with_valid_token() -> None:
     """Host/Origin policy is removed; correct-token requests are never refused."""
@@ -487,7 +474,7 @@ def test_websocket_rejects_v1_result_after_authenticated_registration() -> None:
         with client.websocket_connect(
             "/ws", headers={"Authorization": 'Bearer client-secret-synthetic-credential-0000000000000000'}
         ) as socket:
-            socket.send_json({"version": 1, "type": "register", "client_id": "client-a", "relay_contract": 1})
+            socket.send_json({"version": 1, "type": "register", "client_id": "client-a", "relay_contract": 2})
             socket.receive_json()
             socket.send_json(
                 {"version": 1, "type": "result", "request_id": "r", "result": {}}
@@ -739,7 +726,7 @@ def test_websocket_authenticates_client_bearer_before_token_free_register_frame(
             "/ws", headers={"Authorization": 'Bearer client-secret-synthetic-credential-0000000000000000'}
         ) as ws:
             ws.send_json(
-                {"version": 1, "type": "register", "client_id": "client-a", "relay_contract": 1}
+                {"version": 1, "type": "register", "client_id": "client-a", "relay_contract": 2}
             )
             try:
                 registered = ws.receive_json()
@@ -753,7 +740,7 @@ def test_websocket_authenticates_client_bearer_before_token_free_register_frame(
         "type": "registered",
         "client_id": "client-a",
         "server_version": package_version(),
-        "relay_contract": 1,
+        "relay_contract": 2,
     }
 
 
@@ -785,7 +772,7 @@ def test_websocket_closes_1002_on_contract_mismatched_register() -> None:
             "/ws", headers={"Authorization": 'Bearer client-secret-synthetic-credential-0000000000000000'}
         ) as ws:
             ws.send_json(
-                {"version": 1, "type": "register", "client_id": "client-a", "relay_contract": 2}
+                {"version": 1, "type": "register", "client_id": "client-a", "relay_contract": 1}
             )
             with pytest.raises(WebSocketDisconnect) as exc_info:
                 ws.receive_json()
@@ -800,19 +787,18 @@ def test_websocket_closes_1002_on_contract_mismatched_capabilities() -> None:
             "/ws", headers={"Authorization": 'Bearer client-secret-synthetic-credential-0000000000000000'}
         ) as ws:
             ws.send_json(
-                {"version": 1, "type": "register", "client_id": "client-a", "relay_contract": 1}
+                {"version": 1, "type": "register", "client_id": "client-a", "relay_contract": 2}
             )
             registered = ws.receive_json()
             assert registered["type"] == "registered"
             ws.send_json(
-                {"version": 1, "type": "capabilities", "tools": [], "relay_contract": 9, "client_version": "0.1.0"}
+                {"version": 1, "type": "capabilities", "admin": True, "relay_contract": 9, "client_version": "0.1.0"}
             )
             with pytest.raises(WebSocketDisconnect) as exc_info:
                 ws.receive_json()
             assert exc_info.value.code == 1002
-            # The client was disconnected: the registry holds no capabilities.
-            snapshot = app.state.registry.announced_capabilities
-            assert snapshot == frozenset()
+            # The client was disconnected: nothing from the frame was kept.
+            assert app.state.registry.client_admin is False
 
 
 def test_websocket_rejects_missing_client_bearer_token_secret_safe() -> None:
@@ -836,7 +822,7 @@ def test_websocket_rejects_register_frame_credentials_even_with_valid_bearer() -
                 {
                     "version": 1,
                     "type": "register",
-                    "relay_contract": 1,
+                    "relay_contract": 2,
                     "client_id": "client-a",
                     "token": 'client-secret-synthetic-credential-0000000000000000',
                 }
@@ -855,14 +841,14 @@ def test_websocket_rejects_bad_token_and_second_connection_distinctly() -> None:
             "/ws", headers={"Authorization": 'Bearer client-secret-synthetic-credential-0000000000000000'}
         ) as first:
             first.send_json(
-                {"version": 1, "type": "register", "client_id": "client-a", "relay_contract": 1}
+                {"version": 1, "type": "register", "client_id": "client-a", "relay_contract": 2}
             )
             assert first.receive_json()["type"] == "registered"
             with client.websocket_connect(
                 "/ws", headers={"Authorization": 'Bearer client-secret-synthetic-credential-0000000000000000'}
             ) as duplicate:
                 duplicate.send_json(
-                    {"version": 1, "type": "register", "client_id": "client-a", "relay_contract": 1}
+                    {"version": 1, "type": "register", "client_id": "client-a", "relay_contract": 2}
                 )
                 with pytest.raises(WebSocketDisconnect) as exc_info:
                     duplicate.receive_json()
@@ -913,7 +899,7 @@ def test_websocket_processes_capabilities_and_heartbeat(
                 {
                     "version": 1,
                     "type": "register",
-                    "relay_contract": 1,
+                    "relay_contract": 2,
                     "client_id": "client-a",
                 }
             )
@@ -926,8 +912,8 @@ def test_websocket_processes_capabilities_and_heartbeat(
                 {
                     "version": 1,
                     "type": "capabilities",
-                    "tools": ["sample.exec"],
-                    "relay_contract": 1,
+                    "admin": False,
+                    "relay_contract": 2,
                     "client_version": "0.2.0",
                 }
             )

@@ -1,12 +1,8 @@
 """Relay WebSocket listener: the /ws surface and Client authentication only.
 
-This module owns the Server-to-Client WebSocket handler extracted from the
-legacy single-surface factory. It serves exactly one surface — ``/ws`` — and
-authenticates exactly one channel: the Relay Client Bearer token. MCP
-invocation lives on the separate MCP listener app built by
-:func:`mcp_relay.server.create_mcp_app`; both listener apps receive the SAME
-``RelayRegistry`` instance so a socket registered here is immediately visible
-to the fixed MCP facade.
+Both listener apps share one ``RelayRegistry``, so a Client registered here is
+immediately visible to the MCP facade built by
+:func:`mcp_relay.server.create_mcp_app`.
 """
 
 from __future__ import annotations
@@ -23,6 +19,7 @@ from .protocol import (
     MAX_TOKEN_LENGTH,
     RELAY_CONTRACT,
     Capabilities,
+    Catalog,
     ClientError,
     ClientResult,
     Heartbeat,
@@ -87,7 +84,7 @@ def create_ws_app(
     """Create the WebSocket listener app for an existing registry.
 
     The caller owns the registry: the same instance must back the MCP
-    listener app so that the fixed facade dispatches to sockets accepted
+    listener app so that the MCP facade dispatches to sockets accepted
     here. The app serves only ``/ws`` and publishes no docs or OpenAPI.
     """
     app = FastAPI(
@@ -180,6 +177,8 @@ def create_ws_app(
                         await registry.set_capabilities(connection, message)
                     elif isinstance(message, Heartbeat):
                         await registry.heartbeat(connection)
+                    elif isinstance(message, Catalog):
+                        await registry.set_catalog(connection, message)
                     elif isinstance(message, ClientResult):
                         await registry.handle_result(message)
                     elif isinstance(message, ClientError):

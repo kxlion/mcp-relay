@@ -1,14 +1,12 @@
-"""TDD contract for the ``client.admin`` fail-closed setting.
+"""Contract for the ``client.admin`` fail-closed setting.
 
 The administration switch is active ONLY when the key is explicitly
 ``true`` in the YAML. A missing key, ``false`` or an ``unset`` all lock
-the admin verbs behind ``permission_denied``. The legacy key
-``mcp_admin_enabled`` is gone; the setting is ``client.admin``.
+the admin verbs behind ``permission_denied``.
 """
 
 from __future__ import annotations
 
-import asyncio
 import textwrap
 from pathlib import Path
 
@@ -29,7 +27,7 @@ def _client_config(tmp_path: Path, body: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Model: ClientConfig.admin (renamed from mcp_admin_enabled)
+# Model: ClientConfig.admin
 # ---------------------------------------------------------------------------
 
 
@@ -62,7 +60,6 @@ def test_admin_appears_in_the_dotted_cli_keys() -> None:
     from mcp_relay.config import ClientConfig, configuration_keys
 
     assert "admin" in configuration_keys(ClientConfig)
-    assert "mcp_admin_enabled" not in configuration_keys(ClientConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -118,11 +115,11 @@ def test_non_boolean_admin_is_rejected_by_the_strict_reader(
 
 
 # ---------------------------------------------------------------------------
-# CLI: init generates an explicit opt-in, unset locks
+# CLI: init leaves administration locked, unset locks
 # ---------------------------------------------------------------------------
 
 
-def test_generated_client_yaml_contains_an_explicit_admin_true(
+def test_generated_client_yaml_leaves_administration_locked(
     tmp_path: Path,
 ) -> None:
     import yaml
@@ -131,7 +128,8 @@ def test_generated_client_yaml_contains_an_explicit_admin_true(
     config.init_config(path, "client", env={"RELAY_CLIENT_TOKEN": 'client-synthetic-credential-0000000000000000'})
 
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert document["admin"] is True
+    assert document["admin"] is False
+    assert config.load_client_admin_setting(path) is False
 
 
 def test_unset_locks_the_admin_setting(tmp_path: Path) -> None:
@@ -145,52 +143,3 @@ def test_unset_locks_the_admin_setting(tmp_path: Path) -> None:
 
     assert "admin" not in document
     assert config.load_client_admin_setting(path) is False
-
-
-# ---------------------------------------------------------------------------
-# Step 9: admin gating stays closed while status/discovery stay open
-# ---------------------------------------------------------------------------
-
-
-def test_locked_admin_gates_verbs_but_not_status_or_discovery(
-    tmp_path: Path,
-) -> None:
-    """``client.admin`` locked: admin verbs refuse, client.status (with the
-    hub counters) and mcp.list stay available — no new option involved."""
-    from mcp_relay.config import mcp_entry_add
-
-    from .test_control_capability import (
-        Factory,
-        _catalog_capability,
-        _client_yaml,
-        _invoke,
-    )
-
-    config_path = _client_yaml(tmp_path / "config.yaml")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    mcp_entry_add(config_path, "good", {"command": ["/bin/good"]}, None)
-
-    factory = Factory()
-    capability, _catalog = _catalog_capability(
-        config_path, workspace, factory, admin_enabled=False
-    )
-
-    asyncio.run(capability.hub.reconcile_all())
-
-    # The admin verb is refused with the closed permission_denied payload.
-    denied = _invoke(capability, "mcp.enable", {"alias": "good"})
-    assert denied["code"] == "permission_denied"
-
-    # client.status answers and carries the third-party hub counters.
-    status = _invoke(capability, "client.status", {})
-    assert status["admin"] is False
-    assert status["hub"] == {
-        "configured_aliases": 1,
-        "running_aliases": 1,
-        "available_tools": 1,
-    }
-
-    # Discovery is not blocked either.
-    listing = _invoke(capability, "mcp.list", {})
-    assert [view["alias"] for view in listing["items"]] == ["good"]

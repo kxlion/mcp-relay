@@ -49,10 +49,8 @@ class AliasState(str, enum.Enum):
 
 
 HUB_SPAWN_ATTEMPTS = 3
-#: Step 7A: global startup budget per alias, covering source resolution,
-#: transport open + initialize, and the first inventory. A code constant by
-#: design — there is deliberately no YAML or environment knob for it. The
-#: budget is shared across spawn attempts and never rearmed per attempt.
+#: Startup budget per alias, shared by source resolution and every spawn
+#: attempt (transport, initialize, first inventory). Deliberately not configurable.
 HUB_STARTUP_BUDGET_SECONDS = 120.0
 
 
@@ -125,28 +123,6 @@ def _safe_exception_chain(error: BaseException) -> str:
     return " <- ".join(exception_type_chain(error))
 
 
-def default_source_resolver(
-    *,
-    base_url: str,
-    timeout_seconds: float,
-    transport: Any = None,
-) -> SourceResolver:
-    """Build the production resolver on the bounded official-registry client."""
-
-    from .mcp_registry import lookup_registry_server
-
-    async def resolve(source: str, version: str | None) -> Any:
-        return await lookup_registry_server(
-            source,
-            version=version,
-            base_url=base_url,
-            timeout_seconds=timeout_seconds,
-            transport=transport,
-        )
-
-    return resolve
-
-
 def launcher_argv(summary: Any, version: str | None) -> list[str]:
     """Derive the declarative launcher argv from one registry record."""
     from .mcp_registry import RegistryServerSummary, declarative_launcher
@@ -192,11 +168,10 @@ class McpHub:
         self._provider_timeout_seconds = provider_timeout_seconds
         self._monotonic = monotonic or time.monotonic
         self._runtimes: dict[str, _AliasRuntime] = {}
-        # Step 7B: change observer (wired by the client to catalog
-        # publication). Invoked synchronously after every runtime state
-        # change so STARTING and terminal states become observable while a
-        # startup is still in flight; a failing observer never fails the
-        # reconcile path.
+        self._refresh_tasks: dict[str, asyncio.Task[None]] = {}
+        self._watch_tasks: dict[str, asyncio.Task[None]] = {}
+        # Called synchronously after every runtime state change; a failing
+        # observer never fails the reconcile path.
         self._on_change: Callable[[], None] | None = None
 
     def bind_on_change(self, callback: Callable[[], None] | None) -> None:
@@ -293,88 +268,109 @@ class McpHub:
     def alias_record(self, alias: str) -> AliasCatalog | None:
         """Shape one alias's current state into a catalog record, or None.
 
-        A running alias publishes its live inventory and route reference; a
-        disabled or unavailable alias publishes ``catalog_available: false``
-        with the hub's safe error. This method performs no discovery and no
-        spawn: it reflects state the hub already owns.
+        A running alias is executable only with a fresh inventory: between an
+        upstream ``tools/list_changed`` and the bounded re-read, the alias
+        publishes no tools rather than a stale list.
         """
         run = self._runtimes.get(alias)
         if run is None:
             return None
-        # A RUNNING alias is catalog-available only with a fresh inventory:
-        # an invalidated (or never-read) cache would otherwise publish a
-        # misleading empty tool list. The process state stays RUNNING; the
-        # catalog record honestly refuses discovery until a bounded reread.
         provider = run.provider
         cached = None if provider is None else provider.cached_inventory()
-        inventory_ready = (
-            provider is not None
+        available = (
+            run.state is AliasState.RUNNING
+            and provider is not None
             and bool(provider.inventory_valid)
             and cached is not None
         )
-        available = run.state is AliasState.RUNNING and inventory_ready
-        descriptors: tuple[Any, ...] = ()
         if available:
-            assert provider is not None
-            descriptors = tuple(cached or ())
-        if available:
-            discovery_error: dict[str, str] | None = None
+            error: dict[str, str] | None = None
         elif run.state is AliasState.DISABLED:
-            discovery_error = {
-                "code": "alias_disabled",
-                "message": "the alias is disabled",
-            }
+            error = {"code": "alias_disabled", "message": "the alias is disabled"}
         elif run.state is AliasState.STARTING:
-            # Step 7B: an in-flight startup is honestly reported as
-            # starting, never as an already-failed spawn.
-            discovery_error = {
+            error = {
                 "code": "alias_starting",
                 "message": "the local MCP server is starting",
             }
         elif run.state is AliasState.RUNNING:
-            discovery_error = {
+            error = {
                 "code": "inventory_stale",
-                "message": "the tool inventory is not currently executable",
+                "message": "the tool inventory is being refreshed",
             }
         else:
-            discovery_error = run.last_error or {
+            error = run.last_error or {
                 "code": "spawn_failed",
                 "message": "the local MCP server could not be started",
             }
+        entry = self._applied_entry(run)
         return AliasCatalog(
             alias=alias,
-            # A STARTING alias was committed (enabled in YAML or by an admin
-            # verb) even though the spawn has not landed yet.
             enabled=(
                 run.applied is not None
                 or run.state in (AliasState.RUNNING, AliasState.STARTING)
             ),
             runtime_state=run.state.value,
             transport=_alias_transport(run),
-            entry=dict(run.applied or {}),
-            last_error=run.last_error,
             catalog_available=available,
-            discovery_error=discovery_error,
-            descriptors=descriptors,
-            provider=run.provider if available else None,
-            env_keys=tuple(sorted(read_alias_env(self.config_path, alias))),
+            error=error,
+            descriptors=tuple(cached or ()) if available else (),
+            provider=provider if available else None,
+            tool_filter=None if entry is None else entry.tool_filter(),
         )
 
-    def publish_catalog(self, catalog: ClientCatalog) -> None:
-        """Push the current alias set into the Client catalog.
+    @staticmethod
+    def _applied_entry(run: _AliasRuntime) -> McpServerEntry | None:
+        if run.applied is None:
+            return None
+        try:
+            return McpServerEntry.model_validate(run.applied)
+        except Exception:
+            return None
 
-        Re-publication is idempotent: the catalog keeps its revision unless
-        an executable snapshot actually changed. Aliases removed from the
-        runtime disappear from the catalog. No transport lifecycle happens
-        here — spawns, stops and bounces remain reconcile-only.
-        """
-        current = self._runtimes.keys()
-        for alias in sorted(current):
+    def publish_catalog(self, catalog: ClientCatalog) -> None:
+        """Push the current alias set into the Client catalog."""
+        for alias in sorted(self._runtimes):
             record = self.alias_record(alias)
             if record is not None:
                 catalog.update_alias(record)
-        for alias in sorted(set(catalog.snapshot._records) - set(current)):
+        for alias in sorted(set(catalog.records) - set(self._runtimes)):
             catalog.remove_alias(alias)
+
+    def _watch_inventory(self, alias: str, provider: McpProviderToolClient) -> None:
+        """Re-read an alias inventory after each upstream ``tools/list_changed``."""
+
+        async def refresh() -> None:
+            try:
+                await provider.list_tools()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _debug_log(f"hub inventory refresh failed: alias={alias}")
+            finally:
+                self._refresh_tasks.pop(alias, None)
+                self._note_change()
+
+        async def on_tools_changed() -> None:
+            provider.invalidate_inventory()
+            self._note_change()
+            if alias not in self._refresh_tasks:
+                self._refresh_tasks[alias] = asyncio.create_task(refresh())
+
+        async def on_unavailable() -> None:
+            await provider.wait_unavailable()
+            run = self._runtimes.get(alias)
+            if run is not None and run.provider is provider:
+                # The provider died (crash, deadline): its tools stop being
+                # published until an explicit enable or restart respawns it.
+                run.state = AliasState.UNAVAILABLE
+                run.last_error = {
+                    "code": "alias_unavailable",
+                    "message": "the local MCP server stopped responding",
+                }
+                self._note_change()
+
+        provider.bind_transport_notifications(on_tools_changed)
+        self._watch_tasks[alias] = asyncio.create_task(on_unavailable())
 
     # ------------------------------------------------------------------
     # Reconciliation
@@ -420,6 +416,11 @@ class McpHub:
         status = await self._spawn(alias, entry)
         return status
 
+    async def aclose(self) -> None:
+        """Stop every alias; used once when the Client shuts down."""
+        for alias in sorted(self._runtimes):
+            await self._stop(alias)
+
     async def forget(self, alias: str) -> None:
         """Stop one alias and drop its runtime state entirely."""
         await self._stop(alias)
@@ -431,6 +432,11 @@ class McpHub:
     # ------------------------------------------------------------------
 
     async def _stop(self, alias: str) -> None:
+        for tasks in (self._refresh_tasks, self._watch_tasks):
+            task = tasks.pop(alias, None)
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         run = self._runtimes.get(alias)
         if run is None:
             return
@@ -455,11 +461,7 @@ class McpHub:
         run = self._runtimes.setdefault(alias, _AliasRuntime())
         run.state = AliasState.STARTING
         run.last_error = None
-        # Step 7B: STARTING is published immediately, so the catalog shows
-        # the in-flight startup before the first spawn attempt lands.
         self._note_change()
-        # Step 7A: one global startup budget per alias, shared by source
-        # resolution and every spawn attempt; never rearmed per attempt.
         deadline = self._monotonic() + self._startup_budget_seconds
         try:
             launch = await self._bounded_build_launch(alias, entry, deadline)
@@ -513,7 +515,6 @@ class McpHub:
                     provider_name=alias,
                     timeout_seconds=self._provider_timeout_seconds,
                 )
-                provider.bind_transport_notifications()
                 # Open + initialize + first inventory run against the shared
                 # startup budget, not a per-attempt timeout; the ordinary
                 # per-call provider timeout (30 s) stays unchanged.
@@ -549,6 +550,7 @@ class McpHub:
                 continue
             run.transport = transport
             run.provider = provider
+            self._watch_inventory(alias, provider)
             run.state = AliasState.RUNNING
             run.last_error = None
             run.applied = entry.yaml_value()

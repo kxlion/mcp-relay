@@ -1,25 +1,32 @@
-"""Strict fixed-surface MCP facade for the single-client Relay server.
+"""MCP facade of the Relay Server: Relay tools plus the Client's own tools.
 
-Every public tool is registered statically at startup from the single
-surface definition in ``relay_tools``: two Server-local tools, the enriched
-client status, discovery and execution (always available) and the six
-admin-gated CRUD/reload verbs. Nothing here varies with connectivity, the
-admin setting, or the third-party catalog: one refused operation keeps its
-public descriptor, and no third-party tool is ever published individually.
+Two tools are always listed: ``relay_status`` and ``relay_registry_search``.
+The connected Client's third-party tools are published natively under their
+catalog names, and the five admin tools only while that Client allows
+administration. Every change of that surface is announced to open MCP
+sessions with ``notifications/tools/list_changed``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.server.dependencies import get_context
+from fastmcp.server.middleware import Middleware, MiddlewareContext
+from fastmcp.server.providers import Provider
+from fastmcp.tools import Tool
+from fastmcp.tools.base import ToolResult
+from mcp import types as mcp_types
 from mcp.types import CallToolResult
-from pydantic import Field, ValidationError
+from pydantic import BaseModel, PrivateAttr, ValidationError
 
 from .mcp_registry import (
     DEFAULT_REGISTRY_BASE_URL,
@@ -29,10 +36,17 @@ from .mcp_registry import (
     search_registry_servers,
 )
 from .mcp_results import RelayToolError, relay_error_result
-from .output_models import Output
 from .protocol import (
+    OP_CLIENT_STATUS,
+    OP_MCP_ADD,
+    OP_MCP_COMMAND,
+    OP_MCP_DELETE,
+    OP_MCP_DISABLE,
+    OP_MCP_ENABLE,
+    OP_MCP_MODIFY,
+    RELAY_CONTRACT,
+    CatalogTool,
     InvokeMessage,
-    VersionLabel,
 )
 from .registry import (
     ClientBusyError,
@@ -42,60 +56,37 @@ from .registry import (
     RelayRegistry,
     RemoteClientError,
     UnknownClientError,
-    UnsupportedToolError,
 )
+from .version import package_version
 
-#: Expected dispatch failures mapped to safe, closed MCP tool errors.
+#: Upper bound of the live Client probe made by ``relay_status``.
+STATUS_PROBE_SECONDS = 2.0
+
 _RELAY_FAILURES: tuple[type[BaseException], ...] = (
     UnknownClientError,
     ClientOfflineError,
     ClientBusyError,
     DuplicateRequestError,
-    UnsupportedToolError,
     TimeoutError,
     RemoteClientError,
 )
 
-
-_EXECUTION_STATE_BY_FAILURE: dict[type[BaseException], str] = {
-    # Nothing left the server for these refusals.
-    UnknownClientError: "not_started",
-    ClientOfflineError: "not_started",
-    ClientBusyError: "not_started",
-    DuplicateRequestError: "not_started",
-    UnsupportedToolError: "not_started",
-    # A command may or may not have reached the third-party MCP tool.
-    TimeoutError: "unknown",
-}
-
-
-_CLIENT_EMITTED_ERROR_CODES = frozenset({"result_too_large"})
-
-#: The closed Relay codes the Client can emit in an error frame: the
-#: command/discovery codes, the hub refusals transported by the admin verbs,
-#: and the control capability's structured refusals. Anything else is
-#: normalized to an existing closed code at this facade — the wire contract
-#: never forwards an unknown code to MCP clients.
-_RELAY_CLIENT_ERROR_CODES = frozenset(
+#: Closed codes a Client error frame may carry; anything else is normalized.
+_CLIENT_ERROR_CODES = frozenset(
     {
-        # Client-routed command/discovery codes.
         "invalid_arguments",
-        "catalog_stale",
-        "invalid_cursor",
         "result_too_large",
         "alias_unknown",
         "alias_unavailable",
         "tool_unknown",
         "execution_failed",
         "timeout",
-        # Hub refusals relayed through the admin verbs.
         "config_invalid",
         "spawn_failed",
         "startup_budget_exhausted",
         "spawn_cancelled",
         "transport_unsupported",
         "registry_unreachable",
-        # Control capability structured refusals.
         "invalid_alias",
         "alias_conflict",
         "invalid_entry",
@@ -103,125 +94,52 @@ _RELAY_CLIENT_ERROR_CODES = frozenset(
     }
 )
 
-#: Generic transport-level client codes with one appropriate existing Relay
-#: code each.
-_CODE_NORMALIZATION: dict[str, str] = {
-    "busy": "client_busy",
-    "client_error": "execution_failed",
+_LOCAL_FAILURES: dict[type[BaseException], tuple[str, str, str]] = {
+    # (code, message, execution_state); nothing left the Server for these.
+    UnknownClientError: ("client_unavailable", "client unavailable", "not_started"),
+    ClientOfflineError: ("client_unavailable", "client offline", "not_started"),
+    ClientBusyError: ("client_busy", "client busy", "not_started"),
+    DuplicateRequestError: ("client_busy", "client busy", "not_started"),
+    # The command may or may not have reached the target.
+    TimeoutError: ("timeout", "invocation timed out", "unknown"),
 }
 
 
-def _normalize_relay_code(code: str) -> str:
-    """Map an unknown Relay code onto an existing closed code."""
-    if code in _RELAY_CLIENT_ERROR_CODES:
-        return code
-    return _CODE_NORMALIZATION.get(code, "execution_failed")
-
-
-def _dispatch_failure_error(
-    error: BaseException,
-    *,
-    command_dispatched: bool = True,
-) -> RelayToolError:
-    """Map an expected dispatch failure to a closed-code Relay tool error.
-
-    The closed {code, message, execution_state} contract is honored for every
-    dispatch failure: refusals before the send carry ``not_started`` and a
-    lost or timed-out command carries ``unknown``. Verbs that never execute
-    a business MCP command (``command_dispatched=False`` — mcp.list,
-    client.status) report ``not_started`` even on a timeout: nothing was
-    uncertain, the answer was simply lost.
-    """
+def _failure(error: BaseException) -> RelayToolError:
+    """Map an expected dispatch failure to a closed Relay error."""
     if isinstance(error, RemoteClientError):
-        # Honest passthrough, allowlisted: only codes the relay client itself
-        # emits carry their own message (the client builds it closed and
-        # safe, e.g. result_too_large naming the tool). Any other
-        # RemoteClientError keeps the (normalized) closed code and replaces
-        # the message with the opaque closed fallback.
-        message = (
-            error.message
-            if error.code in _CLIENT_EMITTED_ERROR_CODES
-            else "client invocation failed"
-        )
-        return RelayToolError(
-            _normalize_relay_code(error.code),
-            message,
-            execution_state=error.execution_state,
-        )
-    for failure_type, state in _EXECUTION_STATE_BY_FAILURE.items():
-        if isinstance(error, failure_type):
-            resolved = state
-            if not command_dispatched and failure_type is TimeoutError:
-                resolved = "not_started"
+        if error.code in _CLIENT_ERROR_CODES:
             return RelayToolError(
-                _FAILURE_CODES[failure_type],
-                _FAILURE_MESSAGES[failure_type],
-                execution_state=resolved,
+                error.code, error.message, execution_state=error.execution_state
             )
-    return RelayToolError("internal_error", "internal relay error", execution_state="not_started")
-
-
-_FAILURE_CODES: dict[type[BaseException], str] = {
-    UnknownClientError: "client_unavailable",
-    ClientOfflineError: "client_unavailable",
-    ClientBusyError: "client_busy",
-    DuplicateRequestError: "client_busy",
-    # The Client announced the nine Relay operations; an operation outside
-    # that fixed set is a tool the Relay does not know (closed code set).
-    UnsupportedToolError: "tool_unknown",
-    TimeoutError: "timeout",
-}
-
-_FAILURE_MESSAGES: dict[type[BaseException], str] = {
-    UnknownClientError: "client unavailable",
-    ClientOfflineError: "client offline",
-    ClientBusyError: "client busy",
-    DuplicateRequestError: "client busy",
-    UnsupportedToolError: "unsupported relay operation",
-    TimeoutError: "invocation timed out",
-}
-
-
-def _dispatch_failure_message(
-    error: BaseException,
-    *,
-    command_dispatched: bool = True,
-) -> str:
-    """Map an expected dispatch failure to a bounded, safe message.
-
-    ``command_dispatched=False`` marks verbs that never execute a business
-    MCP command (mcp.list, client.status): a timeout there is a lost
-    discovery/status answer, not an uncertain command, so the spec's
-    ``not_started`` state applies.
-    """
-    closed = _dispatch_failure_error(
-        error, command_dispatched=command_dispatched
+        code = "client_busy" if error.code == "busy" else "execution_failed"
+        return RelayToolError(
+            code, "client invocation failed", execution_state=error.execution_state
+        )
+    for failure_type, (code, message, state) in _LOCAL_FAILURES.items():
+        if isinstance(error, failure_type):
+            return RelayToolError(code, message, execution_state=state)
+    return RelayToolError(
+        "internal_error", "internal relay error", execution_state="not_started"
     )
-    return json.dumps(closed.to_payload())
-
-
-def _request_id() -> str:
-    return uuid.uuid4().hex
 
 
 class _ProgressTunnel:
     """Bind WS progress frames to the invoking tool's FastMCP context.
 
     ``forward`` runs in the WS-ingress task, but ``Context.report_progress``
-    reads request-scoped state from the invoking task's context variables —
-    so the dispatching tool starts a ``pump`` task of its own and forwards
-    each queued frame from there. Progress notifications therefore reach the
-    calling MCP client without any private FastMCP access.
+    reads request-scoped state, so the dispatching tool runs a ``pump`` task
+    of its own and forwards each queued frame from there.
     """
 
     _QUEUE_LIMIT = 256
     _PUMP_POLL_SECONDS = 0.05
 
     def __init__(self) -> None:
-        self._queues: dict[str, asyncio.Queue[tuple[int, str] | None]] = {}
+        self._queues: dict[str, asyncio.Queue[tuple[int, str]]] = {}
         self._closed: set[str] = set()
 
-    def bind(self, request_id: str, ctx: Context) -> None:
+    def bind(self, request_id: str) -> None:
         self._closed.discard(request_id)
         self._queues[request_id] = asyncio.Queue(maxsize=self._QUEUE_LIMIT)
 
@@ -229,22 +147,15 @@ class _ProgressTunnel:
         self._closed.add(request_id)
 
     def forward(self, request_id: str, progress: int, message: str) -> None:
-        """Queue one WS progress frame; called from the WS-ingress task."""
         queue = self._queues.get(request_id)
         if queue is None:
             return
-        try:
-            queue.put_nowait((progress, message))
-        except asyncio.QueueFull:
+        if queue.full():
             # Bounded buffering: drop the oldest rather than grow unbounded.
-            try:
-                queue.get_nowait()
-                queue.put_nowait((progress, message))
-            except asyncio.QueueEmpty:
-                return
+            queue.get_nowait()
+        queue.put_nowait((progress, message))
 
     async def pump(self, request_id: str, ctx: Context) -> None:
-        """Forward queued frames from the invoking task until dispatch ends."""
         queue = self._queues.get(request_id)
         if queue is None:
             return
@@ -260,81 +171,317 @@ class _ProgressTunnel:
                     return
                 continue
             try:
-                await ctx.report_progress(
-                    progress=progress, message=message or None
-                )
+                await ctx.report_progress(progress=progress, message=message or None)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                # A failed notification never breaks the relay invocation.
-                continue
+                continue  # a failed notification never breaks the invocation
 
 
-class LastDisconnectOutput(Output):
-    at: str
-    reason: str
+class _Dispatcher:
+    """Send one bounded invocation to the Client, with progress forwarding."""
+
+    def __init__(self, registry: RelayRegistry, timeout_seconds: float) -> None:
+        self.registry = registry
+        self.timeout_seconds = timeout_seconds
+        self._progress = _ProgressTunnel()
+
+        async def listener(request_id: str, progress: int, message: str) -> None:
+            self._progress.forward(request_id, progress, message)
+
+        registry.set_progress_listener(listener)
+
+    async def invoke(
+        self,
+        operation: str,
+        arguments: dict[str, Any],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CallToolResult:
+        message = InvokeMessage(
+            version=2,
+            type="invoke",
+            request_id=uuid.uuid4().hex,
+            tool_name=operation,
+            arguments=arguments,
+        )
+        try:
+            ctx: Context | None = get_context()
+        except RuntimeError:
+            ctx = None
+        pump: asyncio.Task[None] | None = None
+        if ctx is not None:
+            self._progress.bind(message.request_id)
+            pump = asyncio.create_task(self._progress.pump(message.request_id, ctx))
+        try:
+            return await self.registry.invoke(
+                None, message, timeout_seconds or self.timeout_seconds
+            )
+        finally:
+            if pump is not None:
+                self._progress.unbind(message.request_id)
+                await asyncio.gather(pump, return_exceptions=True)
+
+    async def call(self, operation: str, arguments: dict[str, Any]) -> CallToolResult:
+        """Invoke and render every failure as a closed ``isError`` result."""
+        try:
+            return await self.invoke(operation, arguments)
+        except _RELAY_FAILURES as error:
+            return relay_error_result(_failure(error))
 
 
-class StatusCountersOutput(Output):
-    """Fixed-surface counters; third-party tool counts are never claimed."""
+class RelayedTool(Tool):
+    """One third-party tool of the Client, called through ``mcp.command``."""
 
-    public_tools: int = 0
-    client_operations: int = 0
+    alias: str
+    tool: str
+    _dispatcher: Any = PrivateAttr(default=None)
+
+    async def run(self, arguments: dict[str, Any]) -> ToolResult:
+        assert self._dispatcher is not None
+        result = await self._dispatcher.call(
+            OP_MCP_COMMAND,
+            {"alias": self.alias, "tool": self.tool, "arguments": dict(arguments)},
+        )
+        return ToolResult.from_mcp_result(result)
 
 
-class ClientStatusOutput(Output):
+def _relayed_tool(entry: CatalogTool, dispatcher: _Dispatcher) -> RelayedTool:
+    tool = RelayedTool(
+        name=entry.name,
+        description=entry.description or None,
+        parameters=dict(entry.input_schema),
+        output_schema=(
+            None if entry.output_schema is None else dict(entry.output_schema)
+        ),
+        annotations=(
+            None
+            if not entry.annotations
+            else mcp_types.ToolAnnotations.model_validate(entry.annotations)
+        ),
+        alias=entry.alias,
+        tool=entry.tool,
+    )
+    tool._dispatcher = dispatcher
+    return tool
+
+
+def _admin_tools(dispatcher: _Dispatcher) -> list[Tool]:
+    """The five admin verbs; listed only while the Client allows them."""
+
+    async def relay_mcp_add(
+        alias: str, entry: dict[str, Any]
+    ) -> CallToolResult:
+        """Declare and start a new MCP server alias on the Client.
+
+        ``entry`` takes exactly one of ``command``, ``url`` or ``source``, and
+        may add ``enabled``, ``version``, ``tools`` (allowlist) and ``env``.
+        """
+        return await dispatcher.call(OP_MCP_ADD, {"alias": alias, "entry": entry})
+
+    async def relay_mcp_modify(
+        alias: str, entry: dict[str, Any]
+    ) -> CallToolResult:
+        """Replace an MCP server alias entry completely, then restart it."""
+        return await dispatcher.call(OP_MCP_MODIFY, {"alias": alias, "entry": entry})
+
+    async def relay_mcp_delete(alias: str) -> CallToolResult:
+        """Stop an MCP server and remove its alias from the Client."""
+        return await dispatcher.call(OP_MCP_DELETE, {"alias": alias})
+
+    async def relay_mcp_enable(alias: str) -> CallToolResult:
+        """Enable an MCP server alias and start it."""
+        return await dispatcher.call(OP_MCP_ENABLE, {"alias": alias})
+
+    async def relay_mcp_disable(alias: str) -> CallToolResult:
+        """Disable an MCP server alias; the entry is kept, the server stops."""
+        return await dispatcher.call(OP_MCP_DISABLE, {"alias": alias})
+
+    return [
+        Tool.from_function(function, output_schema=None)
+        for function in (
+            relay_mcp_add,
+            relay_mcp_modify,
+            relay_mcp_delete,
+            relay_mcp_enable,
+            relay_mcp_disable,
+        )
+    ]
+
+
+class _ClientToolsProvider(Provider):
+    """Lists what the connected Client offers, read at every request."""
+
+    def __init__(self, registry: RelayRegistry, dispatcher: _Dispatcher) -> None:
+        super().__init__()
+        self._registry = registry
+        self._dispatcher = dispatcher
+        self._admin = {tool.name: tool for tool in _admin_tools(dispatcher)}
+
+    async def _list_tools(self) -> list[Tool]:
+        tools: list[Tool] = []
+        if self._registry.client_admin:
+            tools.extend(self._admin.values())
+        tools.extend(
+            _relayed_tool(entry, self._dispatcher)
+            for entry in sorted(self._registry.catalog, key=lambda item: item.name)
+        )
+        return tools
+
+    async def _get_tool(self, name: str, version: Any = None) -> Tool | None:
+        if name in self._admin:
+            return self._admin[name] if self._registry.client_admin else None
+        entry = self._registry.catalog_tool(name)
+        return None if entry is None else _relayed_tool(entry, self._dispatcher)
+
+
+class _SessionTracker(Middleware):
+    """Remember open MCP sessions to announce tool-list changes to them.
+
+    The SDK hands out a fresh ``ServerSession`` proxy per request; sending on
+    any of them without a related request uses the connection's standalone
+    stream, so keeping the latest proxy per session id is enough.
+    """
+
+    MAX_SESSIONS = 64
+
+    def __init__(self) -> None:
+        self.sessions: OrderedDict[str, Any] = OrderedDict()
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    async def on_request(self, context: MiddlewareContext[Any], call_next: Any) -> Any:
+        ctx = context.fastmcp_context
+        if ctx is not None:
+            try:
+                session_id, session = ctx.session_id, ctx.session
+            except RuntimeError:
+                pass
+            else:
+                self.sessions[session_id] = session
+                self.sessions.move_to_end(session_id)
+                while len(self.sessions) > self.MAX_SESSIONS:
+                    self.sessions.popitem(last=False)
+        return await call_next(context)
+
+    def announce(self) -> None:
+        """Schedule one ``tools/list_changed`` per session, best effort."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._broadcast())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _broadcast(self) -> None:
+        for session_id, session in list(self.sessions.items()):
+            try:
+                await session.send_notification(
+                    mcp_types.ToolListChangedNotification()
+                )
+            except Exception:
+                self.sessions.pop(session_id, None)
+
+
+# ---------------------------------------------------------------------------
+# relay_status
+# ---------------------------------------------------------------------------
+
+
+class ServerStatus(BaseModel):
+    version: str
+    relay_contract: int
+    published_tools: int
+
+
+class ClientStatus(BaseModel):
     client_id: str | None
     connected: bool
-    capabilities: list[str]
+    version: str | None
+    admin: bool | None
     invocation_state: Literal["idle", "busy"]
     progress: int | None
     heartbeat_age_seconds: float | None
-    # Bounded version metadata with an explicit unknown fallback so MCP
-    # clients can compare server and client versions at a glance.
-    client_version: VersionLabel = "unknown"
-    # Enriched status: connection windows and fixed-surface counters. The
-    # tool always answers from server state, even while no Client connects.
-    connected_since: str | None = None
-    last_disconnect: LastDisconnectOutput | None = None
-    counters: StatusCountersOutput = Field(default_factory=StatusCountersOutput)
-    suggested_action: Literal["start_client"] | None = None
+    connected_since: str | None
+    last_disconnect: dict[str, str] | None
+    uptime_seconds: int | None
+    #: ``live`` (answered now), ``cached`` (last good answer) or ``unavailable``.
+    report: Literal["live", "cached", "unavailable"]
+    report_age_seconds: float | None
 
 
-def _rfc3339(value: float) -> str:
-    return datetime.fromtimestamp(value, tz=timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+class RelayStatus(BaseModel):
+    server: ServerStatus
+    client: ClientStatus
+    mcp_servers: list[dict[str, Any]] | None
+    disk_differs: list[str] | None
 
 
-def _status_output(snapshot: ClientStatusSnapshot) -> ClientStatusOutput:
+def _rfc3339(value: float | None) -> str | None:
+    if value is None:
+        return None
+    return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class _StatusProbe:
+    """Live Client report with a cached fallback when the Client can't answer."""
+
+    def __init__(self, dispatcher: _Dispatcher) -> None:
+        self._dispatcher = dispatcher
+        self._cached: dict[str, Any] | None = None
+        self._cached_at: float | None = None
+
+    async def report(
+        self, snapshot: ClientStatusSnapshot
+    ) -> tuple[dict[str, Any] | None, str, float | None]:
+        if snapshot.connected and snapshot.invocation_state == "idle":
+            timeout = min(STATUS_PROBE_SECONDS, self._dispatcher.timeout_seconds)
+            try:
+                result = await self._dispatcher.invoke(
+                    OP_CLIENT_STATUS, {}, timeout_seconds=timeout
+                )
+            except _RELAY_FAILURES:
+                result = None
+            if result is not None and isinstance(result.structured_content, dict):
+                self._cached = dict(result.structured_content)
+                self._cached_at = time.monotonic()
+                return self._cached, "live", 0.0
+        if self._cached is None or self._cached_at is None:
+            return None, "unavailable", None
+        return self._cached, "cached", round(time.monotonic() - self._cached_at, 3)
+
+
+async def _relay_status(registry: RelayRegistry, probe: _StatusProbe) -> RelayStatus:
+    snapshot = await registry.status_snapshot()
+    report, source, age = await probe.report(snapshot)
     last_disconnect = None
-    if (
-        snapshot.last_disconnect_at is not None
-        and snapshot.last_disconnect_reason is not None
-    ):
-        last_disconnect = LastDisconnectOutput(
-            at=_rfc3339(snapshot.last_disconnect_at),
-            reason=snapshot.last_disconnect_reason,
-        )
-    return ClientStatusOutput(
-        client_id=snapshot.client_id,
-        connected=snapshot.connected,
-        capabilities=list(snapshot.capabilities),
-        invocation_state=snapshot.invocation_state,
-        progress=snapshot.progress,
-        heartbeat_age_seconds=snapshot.heartbeat_age_seconds,
-        client_version=snapshot.client_version or "unknown",
-        connected_since=(
-            _rfc3339(snapshot.connected_since)
-            if snapshot.connected_since is not None
-            else None
+    if snapshot.last_disconnect_at is not None:
+        last_disconnect = {
+            "at": _rfc3339(snapshot.last_disconnect_at) or "",
+            "reason": snapshot.last_disconnect_reason or "",
+        }
+    return RelayStatus(
+        server=ServerStatus(
+            version=package_version() or "unknown",
+            relay_contract=RELAY_CONTRACT,
+            published_tools=len(registry.catalog),
         ),
-        last_disconnect=last_disconnect,
-        counters=StatusCountersOutput(
-            public_tools=snapshot.public_tools,
-            client_operations=snapshot.client_operations,
+        client=ClientStatus(
+            client_id=snapshot.client_id,
+            connected=snapshot.connected,
+            version=snapshot.client_version,
+            admin=snapshot.admin if snapshot.connected else None,
+            invocation_state="busy" if snapshot.invocation_state == "busy" else "idle",
+            progress=snapshot.progress,
+            heartbeat_age_seconds=snapshot.heartbeat_age_seconds,
+            connected_since=_rfc3339(snapshot.connected_since),
+            last_disconnect=last_disconnect,
+            uptime_seconds=None if report is None else report.get("uptime_seconds"),
+            report=source,
+            report_age_seconds=age,
         ),
-        suggested_action=None if snapshot.connected else "start_client",
+        mcp_servers=None if report is None else report.get("mcp_servers"),
+        disk_differs=None if report is None else report.get("disk_differs"),
     )
 
 
@@ -342,37 +489,35 @@ def create_mcp_facade(
     *,
     registry: RelayRegistry,
     timeout_seconds: float,
-    client_id: str | None = None,
     registry_base_url: str = DEFAULT_REGISTRY_BASE_URL,
     registry_transport: Any | None = None,
 ) -> FastMCP:
-    """Create one MCP server for a Relay app with the full fixed surface.
+    """Create the MCP server for one Relay Server.
 
-    The Server-local tools are registered here; the Client-routed tools are
-    registered by :func:`register_client_routed_tools` once the caller has
-    bound the facade to its HTTP app (they need no extra wiring). Together
-    the two groups form the complete static surface from ``relay_tools``:
-    one refused operation keeps its public descriptor and no third-party
-    tool is ever published individually.
-
-    ``registry_transport`` is an httpx2 async transport override used by tests
-    and by deployments that must reach the registry through a custom client;
-    production keeps the default transport.
+    ``registry_transport`` is an httpx2 async transport override for the
+    registry search, used by tests.
     """
-    # ``strict_input_validation`` publishes closed input schemas
-    # (``additionalProperties: false``) through the public FastMCP API — the
-    # Relay contract that used to be enforced by post-hoc private-schema
-    # surgery on the MCP SDK.
-    mcp: FastMCP = FastMCP("MCP Relay", strict_input_validation=True)
-    registered_tool_names: list[str] = []
+    dispatcher = _Dispatcher(registry, timeout_seconds)
+    probe = _StatusProbe(dispatcher)
+    sessions = _SessionTracker()
+    mcp: FastMCP = FastMCP(
+        "MCP Relay",
+        strict_input_validation=True,
+        providers=[_ClientToolsProvider(registry, dispatcher)],
+        middleware=[sessions],
+    )
+    registry.set_surface_listener(sessions.announce)
 
     @mcp.tool
-    async def relay_server_status() -> ClientStatusOutput:
-        """Return the Relay's safe status; always answers, Client or not."""
+    async def relay_status() -> RelayStatus:
+        """Report the Relay Server, the connected Client and its MCP servers.
+
+        Client details come from a short live probe; when the Client is busy
+        or unreachable the last good answer is returned as ``cached`` with its
+        age.
+        """
         try:
-            return _status_output(await registry.status_snapshot())
-        except ToolError:
-            raise
+            return await _relay_status(registry, probe)
         except Exception:
             raise ToolError("internal relay error") from None
 
@@ -389,7 +534,7 @@ def create_mcp_facade(
 
         Returns bounded server metadata: name, title, description, version,
         repository URL and declarative-launcher packages. Never touches the
-        client channel and never writes any configuration.
+        Client and never writes any configuration.
         """
         try:
             search_input = RegistrySearchInput(
@@ -414,311 +559,26 @@ def create_mcp_facade(
                 transport=registry_transport,
             )
         except RegistryUnreachableError:
-            raise ToolError(_structured_error_json("registry_unreachable")) from None
+            raise ToolError(
+                json.dumps(
+                    {
+                        "code": "registry_unreachable",
+                        "message": "registry unreachable",
+                        "suggested_action": "retry_later",
+                    }
+                )
+            ) from None
         except Exception:
             raise ToolError("internal relay error") from None
-
-    registered_tool_names.extend(
-        ("relay_server_status", "relay_registry_search")
-    )
-    registered_tool_names.extend(
-        register_client_routed_tools(
-            mcp,
-            registry=registry,
-            timeout_seconds=timeout_seconds,
-            client_id=client_id,
-        )
-    )
-    registry.set_public_tools_count(len(registered_tool_names))
 
     return mcp
 
 
-def register_client_routed_tools(
-    mcp: FastMCP,
-    *,
-    registry: RelayRegistry,
-    timeout_seconds: float,
-    client_id: str | None = None,
-) -> list[str]:
-    """Register the nine Client-routed tools of the fixed surface.
-
-    Each public tool maps to exactly one wire operation via
-    ``relay_tools.PUBLIC_TO_WIRE`` and dispatches a single bounded
-    ``InvokeMessage`` to the connected Client. The Server-side facade does
-    not interpret arguments: the Client validates them again against the
-    closed operation envelopes. Returns the registered tool names so the
-    facade can report the public surface size without touching any private
-    FastMCP manager.
-    """
-
-    # WS-tunnel progress frames are surfaced to the calling MCP client's
-    # context through the public FastMCP hook ``Context.report_progress``.
-    progress_tunnel = _ProgressTunnel()
-
-    async def _progress_listener(
-        request_id: str, progress: int, message: str
-    ) -> None:
-        progress_tunnel.forward(request_id, progress, message)
-
-    registry.set_progress_listener(_progress_listener)
-
-    async def _dispatch(
-        tool_name: str, arguments: dict[str, Any], ctx: Context
-    ) -> object:
-        message = InvokeMessage(
-            version=2,
-            type="invoke",
-            request_id=_request_id(),
-            tool_name=tool_name,
-            arguments=arguments,
-        )
-        progress_tunnel.bind(message.request_id, ctx)
-        pump_task = asyncio.create_task(
-            progress_tunnel.pump(message.request_id, ctx)
-        )
-        try:
-            return await registry.invoke(client_id, message, timeout_seconds)
-        finally:
-            progress_tunnel.unbind(message.request_id)
-            try:
-                await pump_task
-            except asyncio.CancelledError:
-                pass
-
-    @mcp.tool(output_schema=None)
-    async def relay_client_status(ctx: Context) -> dict[str, Any]:
-        """Report the connected Client's real runtime status; remote call."""
-        try:
-            return cast(dict[str, Any], await _dispatch("client.status", {}, ctx))
-        except _RELAY_FAILURES as error:
-            raise ToolError(
-                _dispatch_failure_message(error, command_dispatched=False)
-            ) from None
-        except ToolError:
-            raise
-        except Exception:
-            raise ToolError("internal relay error") from None
-
-    @mcp.tool(output_schema=None)
-    async def relay_mcp_list(
-        alias: str | None = None,
-        tool: str | None = None,
-        limit: int | None = None,
-        cursor: str | None = None,
-        *,
-        ctx: Context,
-    ) -> dict[str, Any]:
-        """Discover configured MCP servers and their tools; always available.
-
-        Returns the Client's own closed response object: servers, tools or
-        the full tool detail, with the catalog revision and next cursor.
-        """
-        try:
-            arguments: dict[str, object] = {}
-            if alias is not None:
-                arguments["alias"] = alias
-            if tool is not None:
-                arguments["tool"] = tool
-            if limit is not None:
-                arguments["limit"] = limit
-            if cursor is not None:
-                arguments["cursor"] = cursor
-            return cast(dict[str, Any], await _dispatch("mcp.list", arguments, ctx))
-        except _RELAY_FAILURES as error:
-            raise ToolError(
-                _dispatch_failure_message(error, command_dispatched=False)
-            ) from None
-        except ToolError:
-            raise
-        except Exception:
-            raise ToolError("internal relay error") from None
-
-    @mcp.tool(output_schema=None)
-    async def relay_mcp_command(
-        alias: str,
-        tool: str,
-        arguments: dict[str, object],
-        catalog_revision: str,
-        *,
-        ctx: Context,
-    ) -> CallToolResult:
-        """Execute one discovered third-party MCP tool; native result back.
-
-        Requires the catalog revision from discovery. The result is the
-        target tool's own native CallToolResult — multimodal content,
-        structuredContent and isError are relayed intact; it may carry
-        destructive effects. Relay failures are bounded isError results
-        carrying the closed {code, message, execution_state} object.
-        """
-        try:
-            native = cast(
-                CallToolResult,
-                await _dispatch(
-                    "mcp.command",
-                    {
-                        "alias": alias,
-                        "tool": tool,
-                        "arguments": arguments,
-                        "catalog_revision": catalog_revision,
-                    },
-                    ctx,
-                ),
-            )
-        except _RELAY_FAILURES as error:
-            return relay_error_result(_dispatch_failure_error(error))
-        except ToolError:
-            raise
-        except Exception:
-            return relay_error_result(
-                RelayToolError("internal_error", "internal relay error", execution_state="not_started")
-            )
-        return native
-
-    # Admin CRUD tools: the Client's result frame arrives as a NATIVE
-    # CallToolResult from the registry (Tranche 4: converted exactly once at
-    # the WS ingress) — structuredContent carries the capability's closed
-    # dict. Dispatch failures render the closed error object as isError=true,
-    # exactly like relay_mcp_command. They answer structured_output=False so
-    # the SDK's output validation never re-interprets the payload.
-    @mcp.tool(output_schema=None)
-    async def relay_mcp_add(
-        alias: str,
-        entry: dict[str, object],
-        env: dict[str, str] | None = None,
-        *,
-        ctx: Context,
-    ) -> CallToolResult:
-        """Declare and start a new MCP server alias on the Client (admin)."""
-        try:
-            native = cast(
-                CallToolResult,
-                await _dispatch(
-                    "mcp.add", {"alias": alias, "entry": entry, "env": env}, ctx
-                ),
-            )
-        except _RELAY_FAILURES as error:
-            return relay_error_result(_dispatch_failure_error(error))
-        except ToolError:
-            raise
-        except Exception:
-            return relay_error_result(
-                RelayToolError("internal_error", "internal relay error", execution_state="not_started")
-            )
-        return native
-
-    @mcp.tool(output_schema=None)
-    async def relay_mcp_modify(
-        alias: str,
-        entry: dict[str, object],
-        env: dict[str, str] | None = None,
-        *,
-        ctx: Context,
-    ) -> CallToolResult:
-        """Replace an existing MCP server alias entry on the Client (admin)."""
-        try:
-            native = cast(
-                CallToolResult,
-                await _dispatch(
-                    "mcp.modify", {"alias": alias, "entry": entry, "env": env}, ctx
-                ),
-            )
-        except _RELAY_FAILURES as error:
-            return relay_error_result(_dispatch_failure_error(error))
-        except ToolError:
-            raise
-        except Exception:
-            return relay_error_result(
-                RelayToolError("internal_error", "internal relay error", execution_state="not_started")
-            )
-        return native
-
-    @mcp.tool(output_schema=None)
-    async def relay_mcp_delete(
-        alias: str,
-        *,
-        ctx: Context,
-    ) -> CallToolResult:
-        """Stop and remove an MCP server alias from the Client (admin)."""
-        try:
-            native = cast(
-                CallToolResult,
-                await _dispatch("mcp.delete", {"alias": alias}, ctx),
-            )
-        except _RELAY_FAILURES as error:
-            return relay_error_result(_dispatch_failure_error(error))
-        except ToolError:
-            raise
-        except Exception:
-            return relay_error_result(
-                RelayToolError("internal_error", "internal relay error", execution_state="not_started")
-            )
-        return native
-
-    @mcp.tool(output_schema=None)
-    async def relay_mcp_enable(
-        alias: str,
-        *,
-        ctx: Context,
-    ) -> CallToolResult:
-        """Enable an MCP server alias on the Client (admin)."""
-        try:
-            native = cast(
-                CallToolResult,
-                await _dispatch("mcp.enable", {"alias": alias}, ctx),
-            )
-        except _RELAY_FAILURES as error:
-            return relay_error_result(_dispatch_failure_error(error))
-        except ToolError:
-            raise
-        except Exception:
-            return relay_error_result(
-                RelayToolError("internal_error", "internal relay error", execution_state="not_started")
-            )
-        return native
-
-    @mcp.tool(output_schema=None)
-    async def relay_mcp_disable(
-        alias: str,
-        *,
-        ctx: Context,
-    ) -> CallToolResult:
-        """Disable an MCP server alias on the Client; the entry is kept (admin)."""
-        try:
-            native = cast(
-                CallToolResult,
-                await _dispatch("mcp.disable", {"alias": alias}, ctx),
-            )
-        except _RELAY_FAILURES as error:
-            return relay_error_result(_dispatch_failure_error(error))
-        except ToolError:
-            raise
-        except Exception:
-            return relay_error_result(
-                RelayToolError("internal_error", "internal relay error", execution_state="not_started")
-            )
-        return native
-
-    return [
-        "relay_client_status",
-        "relay_mcp_list",
-        "relay_mcp_command",
-        "relay_mcp_add",
-        "relay_mcp_modify",
-        "relay_mcp_delete",
-        "relay_mcp_enable",
-        "relay_mcp_disable",
-    ]
-
-
-def create_mcp_http_app(
-    mcp: FastMCP,
-) -> Any:
+def create_mcp_http_app(mcp: FastMCP) -> Any:
     """Create the FastMCP Streamable HTTP app for the /mcp path.
 
-    Host/Origin protection is intentionally disabled at this configuration
-    point: the relay authenticates every request with its own Bearer token
-    instead. No wildcard allowlist and no CORS middleware are added.
+    Host/Origin protection is disabled here: every request is authenticated
+    with the Relay's own Bearer token instead.
     """
     return mcp.http_app(
         path="/mcp",
@@ -726,14 +586,3 @@ def create_mcp_http_app(
         json_response=True,
         host_origin_protection=False,
     )
-
-
-def _structured_error_json(code: str) -> str:
-    """Encode one structured Relay control error for MCP tool-error results."""
-    suggested = {
-        "registry_unreachable": "retry_later",
-    }.get(code)
-    payload: dict[str, str] = {"code": code, "message": code.replace("_", " ")}
-    if suggested is not None:
-        payload["suggested_action"] = suggested
-    return json.dumps(payload)

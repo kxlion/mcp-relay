@@ -6,7 +6,7 @@ listeners) and ``mcp-relay client`` as subprocesses in an isolated
 temporary ``HOME``, probes the MCP surface (2xx via a real MCP session
 initialize, 401 without a token, 404 on an unknown path), then drives one
 admin cycle (``relay_mcp_add`` of a synthetic stdio MCP server) and one
-``relay_mcp_command`` execution through the facade. Finally it asserts the
+call of the published ``mini__echo`` tool through the facade. Finally it asserts the
 contents of ``server.log`` and ``client.log``: access lines with the
 status-derived levels, Uvicorn startup/shutdown lines for both listeners,
 the session-manager line, admin and execution events — with no duplicated
@@ -214,6 +214,7 @@ def test_real_runtime_logging_bench(tmp_path: pathlib.Path) -> None:
     # admin surface during the bench so the admin log path is exercised.
     raw = yaml.safe_load(config_path.read_text())
     assert set(raw) == {"identity", "relay_url", "workspace", "mcp_servers", "admin"}
+    raw["admin"] = True
     raw["relay_url"] = f"ws://127.0.0.1:{client_port}/ws"
     raw["mcp_servers"] = {}
     config_path.write_text(yaml.safe_dump(raw, sort_keys=False))
@@ -309,23 +310,15 @@ def test_real_runtime_logging_bench(tmp_path: pathlib.Path) -> None:
                             )
                             assert added["status"] == "running", added
 
-                            listing = await invoke(
-                                "relay_mcp_list", {"alias": ALIAS}
-                            )
-                            assert listing["level"] == "tools", listing
-                            assert "echo" in {
-                                i["name"] for i in listing["items"]
-                            }, listing
-                            revision = listing["catalog_revision"]
+                            for _ in range(300):
+                                names = {t.name for t in (await session.list_tools()).tools}
+                                if f"{ALIAS}__echo" in names:
+                                    break
+                                await anyio.sleep(0.1)
+                            assert f"{ALIAS}__echo" in names, names
 
                             command = await session.call_tool(
-                                "relay_mcp_command",
-                                {
-                                    "alias": ALIAS,
-                                    "tool": "echo",
-                                    "arguments": {"text": "log-bench"},
-                                    "catalog_revision": revision,
-                                },
+                                f"{ALIAS}__echo", {"text": "log-bench"}
                             )
                             assert command.is_error is False, command.content
                             if command.structured_content is not None:

@@ -1,8 +1,6 @@
-"""Characterization: owner-boundary cancellation semantics, observable.
+"""Owner-boundary cancellation semantics of the hub transports.
 
-The historic transports contain AnyIO cancel scopes inside a private owner
-task. Tranche 3 replaces them with FastMCP clients; these tests lock the
-OBSERVABLE behavior any implementation must reproduce — expressed only
+These tests lock the observable behavior, expressed only
 through the public ``McpHub`` seam (``transport_factory``, ``reconcile_all``,
 ``provider_clients``, ``forget``) and real synthetic MCP servers:
 
@@ -19,20 +17,98 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import socket
 import sys
 from pathlib import Path
 
 import pytest
 import uvicorn
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
+from mcp_relay.config import mcp_entry_add
 from mcp_relay.mcp_hub import AliasState, McpHub, production_transport_factory
 from mcp_relay.providers.base import ProviderUnavailableError
-from tests.test_characterization_fixed_surface_chain import (
-    _MINI_STDIO,
-    _build_synthetic_http_server,
-    _configure,
-    _free_port,
-)
+
+_MINI_STDIO = """\
+import asyncio
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+
+mcp = MCPServer('mini')
+
+@mcp.tool(structured_output=False)
+async def echo(text: str) -> dict:
+    return {'content': [{'type': 'text', 'text': text}],
+            'structuredContent': {'echo': text},
+            'isError': False, 'resultType': 'complete', 'futureField': [1, 2]}
+
+@mcp.tool(structured_output=False)
+async def fail() -> dict:
+    raise ToolError('tool says no')
+
+@mcp.tool(structured_output=False)
+async def flood(size: int) -> dict:
+    return {'content': [{'type': 'text', 'text': 'x' * size}], 'isError': False}
+
+@mcp.tool(structured_output=False)
+async def linger(seconds: float) -> dict:
+    import asyncio as _aio
+    await _aio.sleep(seconds)
+    return {'content': [{'type': 'text', 'text': 'lingered'}], 'isError': False}
+
+if __name__ == '__main__':
+    mcp.run()
+"""
+
+
+def _configure(config_path: Path, entry: dict[str, object], alias: str = "mini") -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.chmod(0o600) if config_path.exists() else None
+    if not config_path.exists():
+        config_path.write_text(
+            "relay_url: ws://localhost:1/ws\n", encoding="utf-8"
+        )
+        config_path.chmod(0o600)
+    mcp_entry_add(config_path, alias, entry, None)
+
+
+def _free_port() -> int:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = int(listener.getsockname()[1])
+    listener.close()
+    return port
+
+
+def _build_synthetic_http_server() -> MCPServer:
+    """Neutral synthetic Streamable-HTTP MCP server: echo, fail, flood."""
+    mcp = MCPServer("mini-http")
+
+    @mcp.tool(structured_output=False)
+    async def echo(text: str) -> dict:
+        return {
+            "content": [{"type": "text", "text": text}],
+            "structuredContent": {"echo": text},
+            "isError": False,
+            "resultType": "complete",
+            "futureField": [1, 2],
+        }
+
+    @mcp.tool(structured_output=False)
+    async def fail() -> dict:
+        raise ToolError("tool says no")
+
+    @mcp.tool(structured_output=False)
+    async def flood(size: int) -> dict:
+        return {"content": [{"type": "text", "text": "x" * size}], "isError": False}
+
+    @mcp.tool(structured_output=False)
+    async def linger(seconds: float) -> dict:
+        await asyncio.sleep(seconds)
+        return {"content": [{"type": "text", "text": "lingered"}], "isError": False}
+
+    return mcp
 
 
 def _hub_for(config_path: Path, tmp_path: Path) -> McpHub:

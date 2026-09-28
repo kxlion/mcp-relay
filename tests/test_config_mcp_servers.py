@@ -1,4 +1,4 @@
-"""Phase 2 slice 1: ``mcp_servers`` configuration contracts."""
+"""``mcp_servers`` configuration contracts."""
 
 from __future__ import annotations
 

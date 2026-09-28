@@ -112,15 +112,7 @@ def test_provider_descriptor_rejects_ambiguous_name_and_tool_name() -> None:
         ProviderToolDescriptor.model_validate(payload)
 
 
-def test_provider_descriptor_rejects_removed_public_name_identity() -> None:
-    """The derived public name identity is gone without a compat alias."""
-    with pytest.raises(ValidationError):
-        ProviderToolDescriptor.model_validate(
-            _descriptor_payload() | {"public_name": "example.read"}
-        )
-
-
-def test_provider_descriptor_accepts_unambiguous_legacy_name_alias() -> None:
+def test_provider_descriptor_accepts_the_mcp_name_field() -> None:
     payload = _descriptor_payload()
     payload.pop("tool_name")
     payload["name"] = "example.read"

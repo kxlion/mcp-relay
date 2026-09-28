@@ -1,24 +1,15 @@
-"""Third-party command execution: reserve, send once, return native result.
+"""Third-party command execution: resolve, send once, return the native result.
 
-This module is the execution half of the fixed facade's ``relay_mcp_command``
-operation, running inside the Relay Client. It validates the closed envelope,
-resolves the exact ``(alias, tool)`` target through a catalog route
-reservation acquired under snapshot synchronization, executes the upstream
-tool exactly once, and returns the native ``ProviderToolResult`` untouched —
-never passing through the control-result converter, never replaying.
-
-Execution states on this path (plan "Erreurs et résultat incertain"):
-- every refusal before the MCP send is ``not_started``;
-- any failure after the send (transport/provider errors, timeout, lost
-  response) is ``unknown`` — the relay cannot prove the tool had no effect;
-- MCP-native ``isError`` results are relayed intact and are not mapped to
-  Relay error codes.
+Runs inside the Relay Client. Every refusal before the MCP send is
+``not_started``; any failure after it is ``unknown`` because the relay cannot
+prove the tool had no effect. MCP-native ``isError`` results are relayed
+intact. Nothing is ever replayed.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from .json_bounds import JsonBoundsError, JsonObject, validate_json_bounds
 from .mcp_catalog import CatalogError, ClientCatalog
@@ -34,29 +25,6 @@ from .providers.base import (
 
 __all__ = ["CommandError", "execute_command"]
 
-#: Closed Relay error codes the command/discovery paths may produce. The
-#: catalog codes (``invalid_cursor``, ``result_too_large``) belong to the
-#: fixed ``relay_mcp_list`` contract.
-_COMMAND_CODES = frozenset(
-    {
-        "invalid_arguments",
-        "catalog_stale",
-        "invalid_cursor",
-        "result_too_large",
-        "alias_unknown",
-        "alias_unavailable",
-        "tool_unknown",
-        "execution_failed",
-        "timeout",
-    }
-)
-
-_RESERVED_TARGET_WORDS = frozenset({"client", "mcp", "server"})
-
-#: A hook run after the reservation was acquired but before the send, for
-#: callers that must re-check volatile state under the same synchronization.
-PostReservationCheck = Callable[[], Awaitable[None]]
-
 
 class CommandError(Exception):
     """A closed-code command failure: {code, message, execution_state}."""
@@ -64,17 +32,10 @@ class CommandError(Exception):
     def __init__(
         self, code: str, message: str, *, execution_state: str = "not_started"
     ) -> None:
-        if code not in _COMMAND_CODES:  # pragma: no cover - developer guard
-            raise AssertionError(f"unknown command error code: {code}")
         super().__init__(message)
         self.code = code
         self.message = message[:512]
         self.execution_state = execution_state
-
-    @classmethod
-    def from_catalog_error(cls, error: CatalogError) -> "CommandError":
-        """Catalog refusals happen strictly before any send: not_started."""
-        return cls(error.code, error.message, execution_state="not_started")
 
     def to_payload(self) -> dict[str, str]:
         return {
@@ -84,86 +45,43 @@ class CommandError(Exception):
         }
 
 
-def _validate_envelope(arguments: object) -> dict[str, Any]:
-    """Closed envelope: alias, tool, arguments (object), catalog_revision."""
-    if not isinstance(arguments, dict):
+def _validate_envelope(arguments: object) -> tuple[str, str, JsonObject]:
+    """Closed envelope: exactly alias, tool and an arguments object."""
+    if not isinstance(arguments, dict) or set(arguments) != {
+        "alias",
+        "tool",
+        "arguments",
+    }:
         raise CommandError(
-            "invalid_arguments", "command arguments must be an object",
-            execution_state="not_started",
+            "invalid_arguments", "command requires exactly alias, tool, arguments"
         )
-    if set(arguments) != {"alias", "tool", "arguments", "catalog_revision"}:
-        raise CommandError(
-            "invalid_arguments",
-            "command requires exactly alias, tool, arguments, catalog_revision",
-            execution_state="not_started",
-        )
-    alias = arguments["alias"]
-    tool = arguments["tool"]
-    revision = arguments["catalog_revision"]
-    inner = arguments["arguments"]
-    if not isinstance(alias, str) or not alias or alias in _RESERVED_TARGET_WORDS:
-        raise CommandError(
-            "invalid_arguments", "alias is not a valid target",
-            execution_state="not_started",
-        )
-    if not isinstance(tool, str) or not tool:
-        raise CommandError(
-            "invalid_arguments", "tool is not a valid name",
-            execution_state="not_started",
-        )
-    if not isinstance(revision, str) or not revision or len(revision) > 128:
-        raise CommandError(
-            "invalid_arguments", "catalog_revision is not a valid revision",
-            execution_state="not_started",
-        )
+    alias, tool, inner = arguments["alias"], arguments["tool"], arguments["arguments"]
+    if not isinstance(alias, str) or not alias or not isinstance(tool, str) or not tool:
+        raise CommandError("invalid_arguments", "alias and tool must be names")
     try:
         validate_json_bounds(inner, require_object=True, label="arguments")
     except (JsonBoundsError, TypeError, ValueError):
         raise CommandError(
-            "invalid_arguments", "arguments exceed transport bounds",
-            execution_state="not_started",
+            "invalid_arguments", "arguments exceed transport bounds"
         ) from None
-    return {
-        "alias": alias,
-        "tool": tool,
-        "arguments": dict(inner),
-        "catalog_revision": revision,
-    }
+    return alias, tool, dict(inner)
 
 
 async def execute_command(
-    arguments: object,
-    *,
-    catalog: ClientCatalog,
-    on_reservation_check: PostReservationCheck | None = None,
-) -> "CommandOutcome":
-    """Validate, reserve, send once, and return the native result.
+    arguments: object, *, catalog: ClientCatalog
+) -> ProviderToolResult:
+    """Validate, resolve the current route, send once, return the result.
 
-    The reservation is acquired through the catalog (which validates the
-    revision, alias, availability, tool, and generation under its own
-    synchronization). If ``on_reservation_check`` invalidates the catalog
-    before the send, the reservation is cancelled and the call refuses with
-    ``catalog_stale`` / ``not_started`` — never a redirect to a new route.
+    The route is resolved and the call issued without an intervening await,
+    so a catalog change can refuse the call but never redirect it.
     """
-    envelope = _validate_envelope(arguments)
-    alias = envelope["alias"]
-    tool = envelope["tool"]
-    revision = envelope["catalog_revision"]
-    inner_arguments: JsonObject = envelope["arguments"]
+    alias, tool, inner_arguments = _validate_envelope(arguments)
     try:
-        reservation = catalog.reserve_route(alias, tool, revision)
+        provider: Any = catalog.route(alias, tool)
     except CatalogError as error:
-        raise CommandError.from_catalog_error(error) from None
-    if on_reservation_check is not None:
-        await on_reservation_check()
-        if not reservation.still_valid(catalog):
-            raise CommandError(
-                "catalog_stale",
-                "the catalog changed before dispatch",
-                execution_state="not_started",
-            )
+        raise CommandError(error.code, error.message) from None
     try:
-        result = await reservation.provider.call_tool(tool, inner_arguments)
+        return await provider.call_tool(tool, inner_arguments)
     except asyncio.CancelledError:
         raise
     except ProviderResultTooLargeError as error:
@@ -223,19 +141,3 @@ async def execute_command(
             "the target failed after dispatch",
             execution_state="unknown",
         ) from None
-    return CommandOutcome(execution_state="not_started", result=result)
-
-
-class CommandOutcome:
-    """The successful execution result plus its declared execution state.
-
-    ``not_started`` is the honest state here: the call returned a correlated
-    MCP result, but the relay makes no claim about side effects — the state
-    field is not an idempotency guarantee.
-    """
-
-    __slots__ = ("execution_state", "result")
-
-    def __init__(self, *, execution_state: str, result: ProviderToolResult) -> None:
-        self.execution_state = execution_state
-        self.result = result

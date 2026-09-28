@@ -38,11 +38,6 @@ DOTENV_MAX_BYTES = 4096
 #: are never exported into the process environment by the override loader.
 DOTENV_NEVER_EXPORTED = frozenset({"RELAY_MCP_TOKEN", "RELAY_CLIENT_TOKEN"})
 DEFAULT_CONFIG_PATH = Path.home() / CONFIG_DIR_NAME / "config.yaml"
-SERVER_LOCAL_TOOL = "relay_server_status"
-SERVER_REGISTRY_SEARCH_TOOL = "relay_registry_search"
-#: Server-local tools answer from the Relay Server itself; they are never
-#: client capabilities, never configurable, and never relayed to a client.
-SERVER_LOCAL_TOOLS = frozenset({SERVER_LOCAL_TOOL, SERVER_REGISTRY_SEARCH_TOOL})
 
 # --------------------------------------------------------------------------
 # Client-side MCP server aliases (``mcp_servers``)
@@ -68,6 +63,9 @@ MAX_MCP_VERSION_LENGTH = 64
 #: Registry ids are lowercase reverse-DNS names (``io.example/author/server``).
 MCP_SOURCE_PATTERN = r"^[a-z0-9]([a-z0-9._/-]{0,253}[a-z0-9])?$"
 MCP_VERSION_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9.+_-]*$"
+MCP_TOOL_NAME_PATTERN = r"^[A-Za-z0-9._:-]{1,128}$"
+MAX_MCP_TOOL_FILTER_ITEMS = 128
+MAX_MCP_TOOL_DESCRIPTION_LENGTH = 2048
 _ALIAS_ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -197,6 +195,17 @@ class ClientIdentityConfig(ConfigModel):
         return value
 
 
+class McpToolOverride(ConfigModel):
+    """Per-tool settings inside an entry's ``tools`` allowlist."""
+
+    description: (
+        Annotated[
+            str, Field(min_length=1, max_length=MAX_MCP_TOOL_DESCRIPTION_LENGTH)
+        ]
+        | None
+    ) = None
+
+
 class McpServerEntry(ConfigModel):
     """One local MCP server alias entry; transport is derived, never stored."""
 
@@ -234,6 +243,33 @@ class McpServerEntry(ConfigModel):
         | None
     ) = None
     enabled: bool = True
+    #: Optional allowlist: only these tools are published and callable.
+    tools: dict[str, McpToolOverride] | None = None
+
+    @field_validator("tools", mode="before")
+    @classmethod
+    def _tool_allowlist(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            raise ValueError("tools must map tool names to settings")
+        if not 1 <= len(value) <= MAX_MCP_TOOL_FILTER_ITEMS:
+            raise ValueError(
+                f"tools must list 1 to {MAX_MCP_TOOL_FILTER_ITEMS} tool names"
+            )
+        for name in value:
+            if not isinstance(name, str) or not re.fullmatch(
+                MCP_TOOL_NAME_PATTERN, name
+            ):
+                raise ValueError("tools keys must be MCP tool names")
+        # ``navigate:`` (null) and ``navigate: {}`` both mean "no override".
+        return {name: {} if item is None else item for name, item in value.items()}
+
+    def tool_filter(self) -> dict[str, str | None] | None:
+        """The allowlist as ``{tool: description override or None}``."""
+        if self.tools is None:
+            return None
+        return {name: item.description for name, item in self.tools.items()}
 
     @field_validator("command")
     @classmethod
@@ -294,13 +330,8 @@ class ClientConfig(ConfigModel):
     relay_url: str = "ws://127.0.0.1:8001/ws"
     workspace: str = "./workspace"
     mcp_servers: dict[str, McpServerEntry] = Field(default_factory=dict)
-    # The single administration switch. Strict boolean, FAIL-CLOSED: the
-    # default (and the only unlocking value) is handled at the disk-reading
-    # layer — ``load_client_admin_setting`` unlocks ONLY on an explicit
-    # ``true`` in the YAML. It gates only the admin verbs
-    # (mcp.add/modify/delete/enable/disable); discovery and execution are
-    # always available. There is deliberately no mcp_permissions object,
-    # no per-alias or per-tool filter.
+    # The single administration switch, fail-closed: only an explicit
+    # ``true`` in the YAML unlocks the admin verbs (``load_client_admin_setting``).
     admin: Annotated[bool, Field(strict=True)] = False
     env_fields = {
         "RELAY_URL": "relay_url",
@@ -1194,15 +1225,6 @@ def init_config(
         _validate_token(effective_env["RELAY_CLIENT_TOKEN"], "RELAY_CLIENT_TOKEN")
     elif token is None:
         _secret_value({}, "client", "client", config_path, effective_env)
-    # Administration is an explicit opt-in written black on white: a
-    # client YAML whose ``admin`` key is absent ships with
-    # ``admin: true`` so a new deployment is usable, while any key the
-    # operator removes (unset) or writes as false locks the admin
-    # verbs (fail-closed read). A value carried over from a pre-existing
-    # YAML (explicit true or false) is preserved as written.
-    existing_has_admin = isinstance(existing, Mapping) and "admin" in existing
-    if not existing_has_admin:
-        section["admin"] = True
     workspace = _relative_path(section["workspace"], config_path)
     _ensure_private_directory(workspace)
     section["workspace"] = _relative_config_value(section["workspace"], config_path)
@@ -1338,7 +1360,7 @@ def unset_value(path: str | Path | None, scope: Literal["server", "client"], key
 
 MCP_SERVERS_PREFIX = "mcp_servers"
 _MCP_ENTRY_FIELDS = frozenset(
-    {"source", "command", "url", "version", "enabled"}
+    {"source", "command", "url", "version", "enabled", "tools"}
 )
 
 

@@ -1,8 +1,7 @@
 """The bounded result becomes native MCP at the bridge boundary — once.
 
-Tranche 4: the relay no longer maps content blocks by hand. The bounded
-``ProviderToolResult`` (validation d'entrée, wire extras passthrough) is
-rendered through the official SDK model (``mcp.types.CallToolResult``)
+The bounded ``ProviderToolResult`` (input validation, wire extras
+passthrough) is rendered through the official SDK model (``mcp.types.CallToolResult``)
 exactly once, and the facade hands that native result to MCP clients.
 The closed Relay error result (``relay_error_result``) is Relay-owned and
 stays.
@@ -152,22 +151,6 @@ def test_native_result_is_idempotent_on_native_input() -> None:
     native = CallToolResult(content=[TextContent(type="text", text="x")])
 
     assert native_result(native) is native
-
-
-# ---------------------------------------------------------------------------
-# The maison content mapping is gone: no per-block re-construction.
-# The SDK owns the model; the relay only feeds it the validated wire dump.
-# ---------------------------------------------------------------------------
-
-
-def test_no_relay_text_fallback_for_unknown_blocks() -> None:
-    """An unknown block can no longer appear: the bounded model refuses it,
-    so the old JSON-text fallback mapping is dead code and removed."""
-    source = __import__("inspect").getsource(
-        __import__("mcp_relay.mcp_results", fromlist=["mcp_results"])
-    )
-    assert "_content_block" not in source
-    assert "convert_result" not in source
 
 
 # ---------------------------------------------------------------------------

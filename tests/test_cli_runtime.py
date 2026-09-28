@@ -155,7 +155,8 @@ def test_client_runtime_can_start_with_zero_selected_tools(
 
     settings = load_client_settings(config_path, env={"RELAY_CLIENT_TOKEN": 'client-secret-synthetic-credential-0000000000000000'})
     relay_client = RelayClient(settings)
-    assert relay_client._capabilities == {}
+    assert relay_client.catalog.build(max_bytes=1_000_000) == []
+    assert relay_client.control.admin_enabled is False
 
 
 # --------------------------------------------------------------------------
@@ -217,8 +218,6 @@ def test_server_module_entrypoint_exposes_per_listener_bind_flags(
     assert help_result.returncode == 0
     for flag in ("--mcp-host", "--mcp-port", "--client-host", "--client-port"):
         assert flag in help_result.stdout
-    for legacy in ("--host", "--port", "--ws-port"):
-        assert legacy not in help_result.stdout
 
 
 def test_server_main_applies_explicit_bind_flags_over_environment(
