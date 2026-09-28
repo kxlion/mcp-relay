@@ -210,7 +210,7 @@ publishable catalog in one frame:
   "type": "catalog",
   "tools": [
     {
-      "name": "localtools__read_file",
+      "name": "localtools_read_file",
       "alias": "localtools",
       "tool": "read_file",
       "description": "Read a file",

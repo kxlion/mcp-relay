@@ -32,10 +32,10 @@ def test_admin_setting_appears_in_the_dotted_cli_keys() -> None:
 
 
 def test_reserved_mcp_aliases_are_the_fixed_dispatcher_words() -> None:
-    assert RESERVED_MCP_ALIASES == frozenset({"client", "mcp", "server"})
+    assert RESERVED_MCP_ALIASES == frozenset({"client", "mcp", "relay", "server"})
 
 
-@pytest.mark.parametrize("alias", ["client", "mcp", "server"])
+@pytest.mark.parametrize("alias", ["client", "mcp", "relay", "server"])
 def test_reserved_aliases_are_rejected_as_mcp_server_aliases(alias: str) -> None:
     with pytest.raises(ValidationError, match="reserved"):
         ClientConfig.model_validate(

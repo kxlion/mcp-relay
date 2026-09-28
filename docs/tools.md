@@ -9,12 +9,12 @@ Each configured server has an **alias**: a short name such as `localtools`.
 ## Your tools, published natively
 
 Every tool of a running local server appears in `tools/list` as an ordinary MCP
-tool named `<alias>__<tool>`, for example `localtools__read_file`. The
+tool named `<alias>_<tool>`, for example `localtools_read_file`. The
 description, input schema, output schema and annotations are the server's own.
 Call it like any other MCP tool:
 
 ```json
-{"name": "localtools__read_file", "arguments": {"path": "notes.txt"}}
+{"name": "localtools_read_file", "arguments": {"path": "notes.txt"}}
 ```
 
 The result is the tool's native MCP result, including content,
@@ -22,7 +22,7 @@ The result is the tool's native MCP result, including content,
 flatten it into text or add a wrapper.
 
 Public names use only `A-Z a-z 0-9 _ -` and at most 64 characters. When
-`<alias>__<tool>` does not fit that rule, Relay shortens it and appends an
+`<alias>_<tool>` does not fit that rule, Relay shortens it and appends an
 8-character hash, so the name stays stable and unique; the original tool name
 is still the one sent to your server.
 
@@ -131,7 +131,7 @@ Resolved launchers cache packages under `~/.mcp-relay/mcp/<alias>`.
 ### Entry rules and secrets
 
 - Aliases use 1–16 lowercase letters, are unique, and are limited to 32 entries.
-  `client`, `mcp` and `server` are reserved.
+  `client`, `mcp`, `relay` and `server` are reserved.
 - `command` accepts 1–8 items, each at most 512 characters; URLs are at most
   2048 characters and cannot contain user information.
 - `source` is at most 255 characters; `version` is at most 64.

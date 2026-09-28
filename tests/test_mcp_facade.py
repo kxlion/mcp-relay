@@ -87,7 +87,7 @@ class ScriptedClient:
         )
 
 
-def _tool(name: str = "fs__read", tool: str = "read") -> dict[str, Any]:
+def _tool(name: str = "fs_read", tool: str = "read") -> dict[str, Any]:
     return {
         "name": name,
         "alias": "fs",
@@ -145,8 +145,8 @@ def test_client_tools_are_published_natively_with_their_schema() -> None:
         await scripted.connect(tools=[_tool()])
         async with Client(mcp) as client:
             listed = {tool.name: tool for tool in await client.list_tools()}
-            assert set(listed) == {"relay_status", "relay_registry_search", "fs__read"}
-            read = listed["fs__read"]
+            assert set(listed) == {"relay_status", "relay_registry_search", "fs_read"}
+            read = listed["fs_read"]
             assert read.description == "Read a file."
             assert read.input_schema["required"] == ["path"]
             assert read.annotations.read_only_hint is True
@@ -178,9 +178,9 @@ def test_relayed_call_sends_the_exact_identity_and_returns_the_native_result() -
     scripted = ScriptedClient(registry, lambda _: {**_ok("body", {"k": 1}), "progress": [50]})
 
     async def scenario() -> None:
-        await scripted.connect(tools=[_tool("fs__read_1a2b3c4d", "read.v2")])
+        await scripted.connect(tools=[_tool("fs_read_1a2b3c4d", "read.v2")])
         async with Client(mcp) as client:
-            result = await client.call_tool("fs__read_1a2b3c4d", {"path": "/tmp/a"})
+            result = await client.call_tool("fs_read_1a2b3c4d", {"path": "/tmp/a"})
             assert result.content[0].text == "body"
             assert result.structured_content == {"k": 1}
         [invoke] = scripted.invokes
@@ -227,7 +227,7 @@ def test_client_failures_become_closed_error_results(
     async def scenario() -> None:
         await scripted.connect(tools=[_tool()])
         async with Client(mcp) as client:
-            result = await client.call_tool("fs__read", {"path": "x"}, raise_on_error=False)
+            result = await client.call_tool("fs_read", {"path": "x"}, raise_on_error=False)
         assert result.is_error is True
         assert result.content[0].text == (
             f'{{"code":"{code}","message":"{message}","execution_state":"{state}"}}'
@@ -277,7 +277,7 @@ def test_status_does_not_wait_on_a_busy_client() -> None:
     async def scenario() -> None:
         await scripted.connect(tools=[_tool()])
         async with Client(mcp) as client:
-            call = asyncio.create_task(client.call_tool("fs__read", {"path": "x"}))
+            call = asyncio.create_task(client.call_tool("fs_read", {"path": "x"}))
             while not scripted.invokes:
                 await asyncio.sleep(0.01)
             loop = asyncio.get_running_loop()

@@ -40,8 +40,8 @@ def _record(
 
 
 def test_portable_names_are_kept_readable() -> None:
-    assert public_tool_name("browser", "navigate") == "browser__navigate"
-    assert public_tool_name("fs", "read-file_2") == "fs__read-file_2"
+    assert public_tool_name("browser", "navigate") == "browser_navigate"
+    assert public_tool_name("fs", "read-file_2") == "fs_read-file_2"
 
 
 @pytest.mark.parametrize("tool", ["files.read", "ns:tool", "x" * 70])
@@ -49,7 +49,7 @@ def test_unportable_names_get_a_stable_hash_suffix(tool: str) -> None:
     name = public_tool_name("alias", tool)
     assert name == public_tool_name("alias", tool)
     assert len(name) <= 64
-    assert name.startswith("alias__")
+    assert name.startswith("alias_")
     assert all(ch.isalnum() or ch in "_-" for ch in name)
 
 

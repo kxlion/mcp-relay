@@ -588,7 +588,7 @@ def test_error_detail_rejects_unknown_execution_states(
         )
 
 
-def _catalog_tool(name: str = "fs__read", **overrides: object) -> dict[str, object]:
+def _catalog_tool(name: str = "fs_read", **overrides: object) -> dict[str, object]:
     return {
         "name": name,
         "alias": "fs",

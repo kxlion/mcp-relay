@@ -23,7 +23,7 @@ MCP client -> /mcp -> Relay Server -> authenticated WebSocket
 
 Local MCP servers are aggregated behind a single remote MCP facade under
 user-configured aliases. Their tools are published as native MCP tools named
-`<alias>__<tool>`, optionally restricted by the entry's `tools:` allowlist.
+`<alias>_<tool>`, optionally restricted by the entry's `tools:` allowlist.
 The relay forwards messages without functional interpretation and preserves
 request identifiers and correlations.
 

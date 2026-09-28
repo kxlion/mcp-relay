@@ -6,7 +6,7 @@ listeners) and ``mcp-relay client`` as subprocesses in an isolated
 temporary ``HOME``, probes the MCP surface (2xx via a real MCP session
 initialize, 401 without a token, 404 on an unknown path), then drives one
 admin cycle (``relay_mcp_add`` of a synthetic stdio MCP server) and one
-call of the published ``mini__echo`` tool through the facade. Finally it asserts the
+call of the published ``mini_echo`` tool through the facade. Finally it asserts the
 contents of ``server.log`` and ``client.log``: access lines with the
 status-derived levels, Uvicorn startup/shutdown lines for both listeners,
 the session-manager line, admin and execution events — with no duplicated
@@ -312,13 +312,13 @@ def test_real_runtime_logging_bench(tmp_path: pathlib.Path) -> None:
 
                             for _ in range(300):
                                 names = {t.name for t in (await session.list_tools()).tools}
-                                if f"{ALIAS}__echo" in names:
+                                if f"{ALIAS}_echo" in names:
                                     break
                                 await anyio.sleep(0.1)
-                            assert f"{ALIAS}__echo" in names, names
+                            assert f"{ALIAS}_echo" in names, names
 
                             command = await session.call_tool(
-                                f"{ALIAS}__echo", {"text": "log-bench"}
+                                f"{ALIAS}_echo", {"text": "log-bench"}
                             )
                             assert command.is_error is False, command.content
                             if command.structured_content is not None:

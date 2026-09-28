@@ -185,29 +185,29 @@ def test_stdio_tools_are_published_and_callable(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         async with relay(tmp_path, config) as r:
-            names = await r.wait_for_tools(lambda n: "mini__echo" in n)
-            hashed = [name for name in names if name.startswith("mini__files_read_")]
-            assert len(hashed) == 1 and len(hashed[0]) == len("mini__files_read_") + 8
+            names = await r.wait_for_tools(lambda n: "mini_echo" in n)
+            hashed = [name for name in names if name.startswith("mini_files_read_")]
+            assert len(hashed) == 1 and len(hashed[0]) == len("mini_files_read_") + 8
             assert sorted(set(names) - set(hashed)) == [
-                "mini__echo",
-                "mini__fail",
-                "mini__ping",
+                "mini_echo",
+                "mini_fail",
+                "mini_ping",
                 "relay_registry_search",
                 "relay_status",
             ]
             listed = {t.name: t for t in (await r.session.list_tools()).tools}
-            assert listed["mini__echo"].description == "Return the text unchanged."
-            assert listed["mini__echo"].input_schema["properties"]["text"]["type"] == "string"
+            assert listed["mini_echo"].description == "Return the text unchanged."
+            assert listed["mini_echo"].input_schema["properties"]["text"]["type"] == "string"
 
-            echo = await r.session.call_tool("mini__echo", {"text": "hello"})
+            echo = await r.session.call_tool("mini_echo", {"text": "hello"})
             assert echo.is_error is False
             assert echo.structured_content == {"echo": "hello"}
-            assert listed["mini__echo"].output_schema is not None
+            assert listed["mini_echo"].output_schema is not None
 
             renamed = await r.session.call_tool(hashed[0], {})
             assert renamed.content[0].text == "read"
 
-            failed = await r.session.call_tool("mini__fail", {})
+            failed = await r.session.call_tool("mini_fail", {})
             assert failed.is_error is True
             assert "tool says no" in failed.content[0].text
 
@@ -237,16 +237,16 @@ def test_tools_allowlist_and_description_override(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         async with relay(tmp_path, config) as r:
-            names = await r.wait_for_tools(lambda n: "mini__echo" in n)
+            names = await r.wait_for_tools(lambda n: "mini_echo" in n)
             assert sorted(names) == [
-                "mini__echo",
-                "mini__ping",
+                "mini_echo",
+                "mini_ping",
                 "relay_registry_search",
                 "relay_status",
             ]
             listed = {t.name: t for t in (await r.session.list_tools()).tools}
-            assert listed["mini__echo"].description == "Echo for the agent."
-            assert listed["mini__ping"].description == "Answer pong."
+            assert listed["mini_echo"].description == "Echo for the agent."
+            assert listed["mini_ping"].description == "Answer pong."
 
     asyncio.run(scenario())
 
@@ -260,7 +260,7 @@ def test_admin_tools_follow_the_local_switch_and_changes_are_announced(
 
     async def scenario() -> None:
         async with relay(tmp_path, config) as r:
-            names = await r.wait_for_tools(lambda n: "mini__echo" in n)
+            names = await r.wait_for_tools(lambda n: "mini_echo" in n)
             assert {
                 "relay_mcp_add",
                 "relay_mcp_modify",
@@ -274,8 +274,8 @@ def test_admin_tools_follow_the_local_switch_and_changes_are_announced(
             assert disabled.is_error is False
             assert disabled.structured_content["runtime_state"] == "disabled"
             await asyncio.wait_for(r.changed.wait(), timeout=10)
-            names = await r.wait_for_tools(lambda n: "mini__echo" not in n)
-            assert not [name for name in names if name.startswith("mini__")]
+            names = await r.wait_for_tools(lambda n: "mini_echo" not in n)
+            assert not [name for name in names if name.startswith("mini_")]
 
             refused = await r.session.call_tool("relay_mcp_delete", {"alias": "nope"})
             assert refused.is_error is True
@@ -293,7 +293,7 @@ def test_admin_tools_hidden_when_disabled_and_disconnect_is_announced(
 
     async def scenario() -> None:
         async with relay(tmp_path, config) as r:
-            names = await r.wait_for_tools(lambda n: "mini__echo" in n)
+            names = await r.wait_for_tools(lambda n: "mini_echo" in n)
             assert not [name for name in names if name.startswith("relay_mcp_")]
             direct = await r.session.call_tool("relay_mcp_add", {"alias": "x", "entry": {}})
             assert direct.is_error is True
@@ -304,7 +304,7 @@ def test_admin_tools_hidden_when_disabled_and_disconnect_is_announced(
             r.changed.clear()
             r.client.stop()
             await asyncio.wait_for(r.changed.wait(), timeout=10)
-            names = await r.wait_for_tools(lambda n: "mini__echo" not in n)
+            names = await r.wait_for_tools(lambda n: "mini_echo" not in n)
             assert sorted(names) == ["relay_registry_search", "relay_status"]
             status = (await r.session.call_tool("relay_status", {})).structured_content
             assert status["client"]["connected"] is False
@@ -333,8 +333,8 @@ def test_streamable_http_mcp_server(tmp_path: Path) -> None:
 
         async def scenario() -> None:
             async with relay(tmp_path, config) as r:
-                await r.wait_for_tools(lambda n: "mini__ping" in n)
-                ping = await r.session.call_tool("mini__ping", {})
+                await r.wait_for_tools(lambda n: "mini_ping" in n)
+                ping = await r.session.call_tool("mini_ping", {})
                 assert ping.content[0].text == "pong"
 
         asyncio.run(scenario())

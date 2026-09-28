@@ -201,7 +201,7 @@ def test_mcp_entry_add_reports_alias_overflow_as_config_error(tmp_path: Path) ->
     assert len(mcp_entries(config_path)) == MAX_MCP_ALIASES
 
 
-@pytest.mark.parametrize("alias", ["client", "mcp", "server"])
+@pytest.mark.parametrize("alias", ["client", "mcp", "relay", "server"])
 def test_reserved_aliases_are_refused_by_every_mcp_entry_mutation(
     tmp_path: Path, alias: str
 ) -> None:
