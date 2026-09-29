@@ -63,6 +63,14 @@ uv lock --check
 git diff --check
 ```
 
+When a change touches `.github/` or a shell script, also run:
+
+```sh
+uv run --frozen actionlint
+uv run --frozen zizmor --offline .github
+uv run --frozen shellcheck scripts/*.sh .github/scripts/*.sh
+```
+
 - Add or update focused tests when behavior or a public contract changes.
 - For a defect, add a regression test that reproduces the failure when practical.
 - Report only checks and runtime evidence that were actually obtained. A mock,

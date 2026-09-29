@@ -1,7 +1,8 @@
 # Container image for mcp-relay: when a GitHub release is published (or on a
-# manual run for an existing release tag), build the Dockerfile at that tag on
-# a native runner per architecture, smoke-test the Relay Server in each image,
-# push each image by digest, then publish one multi-arch tag set on ghcr.io.
+# manual run for an existing release tag) and CI passed on the tagged commit,
+# build the Dockerfile at that tag on a native runner per architecture,
+# smoke-test the Relay Server in each image, push each image by digest, then
+# publish one multi-arch tag set on ghcr.io.
 # Pushes use the job's GITHUB_TOKEN; no registry credential is stored.
 #
 # Third-party actions are pinned to full commit SHAs (version in comment).
@@ -36,6 +37,10 @@ jobs:
     name: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      # Read the ci-required check run of the tagged commit.
+      checks: read
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
@@ -85,6 +90,22 @@ jobs:
           fi
           echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      # Helper scripts come from the workflow's own commit, so a manual run
+      # for an older release tag uses the current scripts.
+      - name: Check out the workflow scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .ci
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: CI passed on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ steps.source.outputs.revision }}
+        run: bash .ci/.github/scripts/require-ci.sh "$REVISION"
+
   build:
     name: build ${{ matrix.arch }}
     needs: prepare
@@ -92,6 +113,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      # Push the per-architecture image by digest.
       packages: write
     strategy:
       fail-fast: true
@@ -106,6 +128,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      # Helper scripts come from the workflow's own commit, so a manual run
+      # for an older release tag uses the current scripts.
+      - name: Check out the workflow scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .ci
+          sparse-checkout: .github/scripts
           persist-credentials: false
 
       - name: Set up Buildx
@@ -124,52 +156,7 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           ARCH: ${{ matrix.arch }}
-        run: |
-          actual_arch="$(docker image inspect mcp-relay:smoke --format '{{.Architecture}}')"
-          if [ "$actual_arch" != "$ARCH" ]; then
-            echo "::error::image architecture is '$actual_arch', expected '$ARCH'"
-            exit 1
-          fi
-
-          reported="$(docker run --rm mcp-relay:smoke --version)"
-          if [ "$reported" != "mcp-relay $VERSION" ]; then
-            echo "::error::image reports '$reported', expected 'mcp-relay $VERSION'"
-            exit 1
-          fi
-
-          # Synthetic, single-use tokens for this run only.
-          mcp_token="$(openssl rand -hex 32)"
-          client_token="$(openssl rand -hex 32)"
-          echo "::add-mask::$mcp_token"
-          echo "::add-mask::$client_token"
-
-          docker run -d --name relay-smoke \
-            -e RELAY_SERVER_MCP_HOST=0.0.0.0 -e RELAY_SERVER_CLIENT_HOST=0.0.0.0 \
-            -e RELAY_MCP_TOKEN="$mcp_token" -e RELAY_CLIENT_TOKEN="$client_token" \
-            -p 127.0.0.1:8000:8000 -p 127.0.0.1:8001:8001 \
-            mcp-relay:smoke server
-          trap 'docker logs relay-smoke; docker rm -f relay-smoke >/dev/null' EXIT
-
-          code=000
-          for _ in $(seq 1 30); do
-            code="$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8000/mcp || true)"
-            [ "$code" != 000 ] && break
-            sleep 1
-          done
-          if [ "$code" != 401 ]; then
-            echo "::error::unauthenticated /mcp returned $code, expected 401"
-            exit 1
-          fi
-
-          code="$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8000/mcp \
-            -H "Authorization: Bearer $mcp_token" \
-            -H 'Content-Type: application/json' \
-            -H 'Accept: application/json, text/event-stream' \
-            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}')"
-          if [ "$code" != 200 ]; then
-            echo "::error::authenticated initialize returned $code, expected 200"
-            exit 1
-          fi
+        run: bash .ci/.github/scripts/docker-smoke.sh mcp-relay:smoke "$VERSION" "$ARCH"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -206,7 +193,7 @@ jobs:
           touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
 
       - name: Upload the digest
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: digest-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
@@ -220,10 +207,11 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      # Publish the multi-arch tags.
       packages: write
     steps:
       - name: Download the digests
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: ${{ runner.temp }}/digests
           pattern: digest-*

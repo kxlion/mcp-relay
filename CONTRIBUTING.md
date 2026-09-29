@@ -43,6 +43,14 @@ uv lock --check
 git diff --check
 ```
 
+When a change touches `.github/` or a shell script, also run:
+
+```sh
+uv run --frozen actionlint
+uv run --frozen zizmor --offline .github
+uv run --frozen shellcheck scripts/*.sh .github/scripts/*.sh
+```
+
 Dependency changes must update `pyproject.toml` and regenerate `uv.lock` with
 `uv`; do not hand-edit the lockfile. For a named dependency update, regenerate
 only that package and inspect the resulting graph:

@@ -1,6 +1,7 @@
-# CI for mcp-relay: quality + unit tests on Linux, then E2E (integration
-# suite including the filesystem bench) on Ubuntu and Windows in parallel,
-# then a fail-closed aggregate gate. No publication/deployment anywhere.
+# CI for mcp-relay: static checks on Linux, unit tests and E2E (integration
+# suite including the filesystem bench) on Ubuntu and Windows, a Docker image
+# smoke test, all in parallel, then a fail-closed aggregate gate. No
+# publication/deployment anywhere.
 #
 # Third-party actions are pinned to full commit SHAs (version in comment).
 name: CI
@@ -16,9 +17,10 @@ permissions:
   contents: read
 
 concurrency:
-  # One run per PR/ref; never cancel runs of other PRs.
+  # One run per PR/ref; never cancel runs of other PRs. A new push to a PR
+  # cancels its previous run; every commit on main keeps its own result.
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
   run:
@@ -28,7 +30,7 @@ jobs:
   checks:
     name: checks
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,6 +52,40 @@ jobs:
       - name: Lint (ruff)
         run: uv run --frozen ruff check .
 
+      # actionlint runs the locked shellcheck on every workflow run block.
+      - name: Lint workflows (actionlint)
+        run: uv run --frozen actionlint
+
+      - name: Audit workflows (zizmor)
+        run: uv run --frozen zizmor --offline .github
+
+      - name: Lint shell scripts (shellcheck)
+        run: uv run --frozen shellcheck scripts/*.sh .github/scripts/*.sh
+
+  unit:
+    name: unit ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux
+          - os: windows-latest
+            label: windows
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
       - name: Unit tests
         run: uv run --frozen python -m pytest -q -ra -m "not integration" --junitxml=reports/unit.xml
 
@@ -64,16 +100,15 @@ jobs:
 
       - name: Upload unit test report
         if: ${{ always() && !cancelled() }}
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: reports-checks
+          name: reports-unit-${{ matrix.label }}
           path: reports/unit.xml
           retention-days: 7
           if-no-files-found: error
 
   e2e:
     name: e2e ${{ matrix.label }}
-    needs: checks
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -123,8 +158,10 @@ jobs:
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
 
       - name: Expose installed binary to the bench
+        env:
+          LABEL: ${{ matrix.label }}
         run: |
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+          if [ "$LABEL" = windows ]; then
             printf 'MCP_RELAY_BIN=%s\n' "$(uv tool dir --bin)/mcp-relay.exe" >> "$GITHUB_ENV"
           else
             printf 'MCP_RELAY_BIN=%s\n' "$(uv tool dir --bin)/mcp-relay" >> "$GITHUB_ENV"
@@ -143,29 +180,63 @@ jobs:
 
       - name: Upload integration report
         if: ${{ always() && !cancelled() }}
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: reports-e2e-${{ matrix.label }}
           path: reports/integration.xml
           retention-days: 7
           if-no-files-found: error
 
-  # Fail-closed aggregate gate: success ONLY if checks AND every e2e matrix
-  # leg succeeded. failure, cancelled, skipped or a missing result = red.
+  # The release image workflow builds the same Dockerfile; building it here
+  # catches a broken image before a release, not after.
+  docker:
+    name: docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: mcp-relay:ci
+
+      - name: Smoke-test the Relay Server in the container
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          bash .github/scripts/docker-smoke.sh mcp-relay:ci "$version" amd64
+
+  # Fail-closed aggregate gate: success ONLY if every job above and every
+  # matrix leg succeeded. failure, cancelled, skipped or a missing result = red.
   ci-required:
     name: ci-required
-    needs: [checks, e2e]
+    needs: [checks, unit, e2e, docker]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Evaluate gate
+        env:
+          RESULTS: >-
+            checks=${{ needs.checks.result }}
+            unit=${{ needs.unit.result }}
+            e2e=${{ needs.e2e.result }}
+            docker=${{ needs.docker.result }}
         run: |
-          results=("${{ needs.checks.result }}" "${{ needs.e2e.result }}")
           ok=true
-          for result in "${results[@]}"; do
-            if [ "$result" != "success" ]; then
-              echo "::error::required job result is '$result' (expected 'success')"
+          for entry in $RESULTS; do
+            if [ "${entry#*=}" != "success" ]; then
+              echo "::error::required job ${entry%%=*} result is '${entry#*=}' (expected 'success')"
               ok=false
             fi
           done
