@@ -15,7 +15,7 @@ import time
 import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -26,7 +26,7 @@ from fastmcp.tools import Tool
 from fastmcp.tools.base import ToolResult
 from mcp import types as mcp_types
 from mcp.types import CallToolResult
-from pydantic import BaseModel, PrivateAttr, ValidationError
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError
 
 from .mcp_registry import (
     DEFAULT_REGISTRY_BASE_URL,
@@ -508,33 +508,65 @@ def create_mcp_facade(
     )
     registry.set_surface_listener(sessions.announce)
 
-    @mcp.tool
+    @mcp.tool(
+        annotations=mcp_types.ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+    )
     async def relay_status() -> RelayStatus:
         """Report the Relay Server, the connected Client and its MCP servers.
 
-        Client details come from a short live probe; when the Client is busy
-        or unreachable the last good answer is returned as ``cached`` with its
-        age.
+        Call it first to check that the Client is connected and which server
+        aliases run, when a tool is missing or fails, and after an
+        administration change. Read-only. Client details come from a short
+        live probe; when the Client is busy or unreachable the last good
+        answer is returned as ``cached`` with its age. To discover servers
+        that are not configured yet, use ``relay_registry_search``.
         """
         try:
             return await _relay_status(registry, probe)
         except Exception:
             raise ToolError("internal relay error") from None
 
-    @mcp.tool
+    @mcp.tool(
+        annotations=mcp_types.ToolAnnotations(readOnlyHint=True, openWorldHint=True)
+    )
     async def relay_registry_search(
-        query: str,
-        limit: int = 10,
-        cursor: str | None = None,
-        version: str | None = None,
-        updated_since: str | None = None,
-        include_deleted: bool = False,
+        query: Annotated[
+            str,
+            Field(description="Text matched against server names, 1-200 characters."),
+        ],
+        limit: Annotated[int, Field(description="Results per page, 1-50.")] = 10,
+        cursor: Annotated[
+            str | None,
+            Field(
+                description="The next_cursor of a previous result; omit for the first page."
+            ),
+        ] = None,
+        version: Annotated[
+            str | None,
+            Field(description="'latest' or an exact server version."),
+        ] = None,
+        updated_since: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "RFC 3339 timestamp: only servers updated since then, "
+                    "deleted entries included."
+                )
+            ),
+        ] = None,
+        include_deleted: Annotated[
+            bool, Field(description="Also return servers deleted from the registry.")
+        ] = False,
     ) -> RegistrySearchResult:
-        """Search the official MCP Registry (read-only, server-side).
+        """Search the official MCP Registry for servers to add (read-only, server-side).
 
-        Returns bounded server metadata: name, title, description, version,
-        repository URL and declarative-launcher packages. Never touches the
-        Client and never writes any configuration.
+        Use it to discover a server that is not configured yet; for the
+        servers the Client already runs, use ``relay_status``. Returns bounded
+        server metadata: name, title, description, version, repository URL
+        and declarative-launcher packages, plus ``next_cursor`` to pass back
+        as ``cursor`` for the next page. A returned ``name`` is the ``source``
+        for adding that server. Never touches the Client and never writes any
+        configuration.
         """
         try:
             search_input = RegistrySearchInput(

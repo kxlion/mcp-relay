@@ -137,6 +137,33 @@ def test_offline_surface_is_status_and_registry_search_only() -> None:
     _run(scenario)
 
 
+def test_relay_tools_are_read_only_and_describe_every_argument() -> None:
+    _, mcp = _facade()
+
+    async def scenario() -> None:
+        async with Client(mcp) as client:
+            listed = {tool.name: tool for tool in await client.list_tools()}
+            status = listed["relay_status"].annotations
+            assert (status.read_only_hint, status.open_world_hint) == (True, False)
+            search = listed["relay_registry_search"]
+            assert (search.annotations.read_only_hint, search.annotations.open_world_hint) == (
+                True,
+                True,
+            )
+            properties = search.input_schema["properties"]
+            assert set(properties) == {
+                "query",
+                "limit",
+                "cursor",
+                "version",
+                "updated_since",
+                "include_deleted",
+            }
+            assert all(schema.get("description") for schema in properties.values())
+
+    _run(scenario)
+
+
 def test_client_tools_are_published_natively_with_their_schema() -> None:
     registry, mcp = _facade()
     scripted = ScriptedClient(registry)
