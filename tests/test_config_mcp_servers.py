@@ -270,6 +270,7 @@ def test_alias_dotenv_rejects_oversized_file(tmp_path: Path) -> None:
         write_alias_env(config_path, "cua", {"BIG": "x" * 5000})
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file mode and owner checks do not apply on Windows")
 def test_alias_dotenv_rejects_non_private_file(tmp_path: Path) -> None:
     config_path = _client_yaml(tmp_path / "config.yaml")
     write_alias_env(config_path, "cua", {"A": "b"})

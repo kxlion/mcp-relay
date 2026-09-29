@@ -81,7 +81,8 @@ def test_server_onboarding_writes_topology_to_dotenv_without_creating_yaml(
     assert not config_path.exists()
     dotenv_path = _dotenv(config_path)
     assert dotenv_path.is_file()
-    assert (dotenv_path.stat().st_mode & 0o777) == 0o600
+    if os.name != "nt":
+        assert (dotenv_path.stat().st_mode & 0o777) == 0o600
     values = _dotenv_values(config_path)
     assert values["RELAY_SERVER_MCP_HOST"] == "0.0.0.0"
     assert values["RELAY_SERVER_MCP_PORT"] == "8000"

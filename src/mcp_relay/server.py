@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import socket
+import sys
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from ipaddress import ip_address
@@ -490,11 +491,17 @@ def _bind_listener_socket(host: str, port: int, *, name: str) -> socket.socket:
     """Bind and listen on one exact configured address, without fallback."""
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     listener = socket.socket(family, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if sys.platform == "win32":
+        # Windows SO_REUSEADDR lets another socket bind a port that is already
+        # listening; SO_EXCLUSIVEADDRUSE refuses such a bind in both directions.
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         listener.bind((host, port))
-        # Listening makes the reservation exclusive even when SO_REUSEADDR is
-        # enabled and remains compatible with asyncio.create_server(sock=...).
+        # On POSIX, listening makes the reservation exclusive even with
+        # SO_REUSEADDR; the socket stays compatible with
+        # asyncio.create_server(sock=...).
         listener.listen()
     except OSError as exc:
         listener.close()

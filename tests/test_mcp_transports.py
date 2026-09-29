@@ -15,7 +15,6 @@ These tests lock the observable contracts:
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +25,7 @@ from mcp_relay.mcp_hub import (
     AliasLaunch,
     FastMcpClientTransport,
 )
+from tests.processes import process_exists
 
 _MINI_SERVER = """\
 import json
@@ -111,8 +111,7 @@ def test_fastmcp_transport_spawns_a_synthetic_mcp_server_and_reaps_it(
 
     # No orphan process: the real stdio child was reaped by the close.
     child_pid = int(pid_file.read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(child_pid, 0)
+    assert not process_exists(child_pid)
 
 
 def test_fastmcp_transport_surfaces_tools_list_changed(tmp_path: Path) -> None:
@@ -237,8 +236,7 @@ def test_fastmcp_transport_cross_task_close_reaps_the_child(tmp_path: Path) -> N
     asyncio.run(asyncio.wait_for(scenario(), timeout=20))
 
     child_pid = int(pid_file.read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(child_pid, 0)
+    assert not process_exists(child_pid)
 
 
 def test_fastmcp_transport_http_lifecycle(tmp_path: Path) -> None:

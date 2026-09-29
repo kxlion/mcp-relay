@@ -8,13 +8,13 @@ terminal and idempotent, and real stdio children are reaped.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
 import pytest
 
 from mcp_relay.mcp_hub import AliasLaunch, FastMcpClientTransport
+from tests.processes import process_exists
 
 _MINI_SERVER = """\
 import json
@@ -83,8 +83,7 @@ def _pid_writing_script(tmp_path: Path, body: str) -> tuple[Path, Path]:
 
 def _assert_child_reaped(pid_file: Path) -> None:
     child_pid = int(pid_file.read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(child_pid, 0)
+    assert not process_exists(child_pid)
 
 
 @pytest.mark.parametrize(

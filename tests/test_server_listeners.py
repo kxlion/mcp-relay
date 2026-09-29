@@ -471,9 +471,20 @@ async def _wait_until(
 
 
 def _assert_ports_released(host: str, *ports: int) -> None:
+    # On Windows a venv python.exe is a launcher: killing it ends the real
+    # interpreter, which holds the exclusive listeners, a moment later.
+    deadline = time.monotonic() + 5
     for port in ports:
-        rebound = _listener(host, port)
-        rebound.close()
+        while True:
+            try:
+                rebound = _listener(host, port)
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
+                continue
+            rebound.close()
+            break
 
 
 def _server_process(

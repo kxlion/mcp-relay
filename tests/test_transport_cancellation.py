@@ -12,7 +12,6 @@ replayed against real servers and real processes:
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
@@ -20,6 +19,7 @@ import pytest
 
 from mcp_relay.config import mcp_entry_add
 from mcp_relay.mcp_hub import AliasLaunch, FastMcpClientTransport, McpHub
+from tests.processes import process_exists
 
 _MINI_SERVER = """\
 import json
@@ -135,8 +135,7 @@ def test_cancelled_close_waiter_does_not_orphan_the_child(tmp_path: Path) -> Non
     asyncio.run(asyncio.wait_for(scenario(), timeout=20))
 
     child_pid = int(pid_file.read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(child_pid, 0)
+    assert not process_exists(child_pid)
 
 
 def test_cancelled_concurrent_startup_preserves_the_other_request(

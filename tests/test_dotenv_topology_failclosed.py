@@ -23,6 +23,10 @@ ENV = {
     "RELAY_MCP_TOKEN": 'mcp-test-synthetic-credential-0000000000000000',
 }
 
+_POSIX_ONLY = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX file mode and owner checks do not apply on Windows"
+)
+
 
 def _write_dotenv(config_path: Path, contents: str, mode: int = 0o600) -> Path:
     dotenv = config_path.parent / ".env"
@@ -77,6 +81,7 @@ def test_oversized_topology_dotenv_blocks_startup(tmp_path: Path) -> None:
     _assert_error_names_dotenv(excinfo)
 
 
+@_POSIX_ONLY
 def test_bad_permissions_topology_dotenv_blocks_startup(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config.init_config(config_path, "client", env=ENV)
@@ -90,6 +95,7 @@ def test_bad_permissions_topology_dotenv_blocks_startup(tmp_path: Path) -> None:
     _assert_error_names_dotenv(excinfo)
 
 
+@_POSIX_ONLY
 def test_foreign_owner_topology_dotenv_blocks_startup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -106,6 +112,7 @@ def test_foreign_owner_topology_dotenv_blocks_startup(
     assert str(dotenv) in str(excinfo.value)
 
 
+@_POSIX_ONLY
 def test_unreadable_topology_dotenv_blocks_startup(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config.init_config(config_path, "client", env=ENV)
