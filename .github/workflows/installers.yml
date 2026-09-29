@@ -1,0 +1,111 @@
+# One-line installers against PyPI: run scripts/install.sh and
+# scripts/install.ps1 as a user would, without MCP_RELAY_PROJECT_ROOT, and
+# check that they install the expected release from PyPI. Runs weekly on
+# main (latest release), after each PyPI release (that version), or manually.
+# CI covers the installers against the checkout; this covers the PyPI path.
+#
+# Third-party actions are pinned to full commit SHAs (version in comment).
+name: Installers
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release to install, for example 0.1.0 (default latest)
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        description: Release to install, for example 0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# A fixed prefix, not github.workflow: when called from the release workflow,
+# github.workflow names the caller, whose own group would then deadlock.
+concurrency:
+  group: installers-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  expected:
+    name: expected version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      pinned: ${{ steps.version.outputs.pinned }}
+    steps:
+      - name: Resolve the expected version
+        id: version
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          if [ -n "$REQUESTED" ]; then
+            if [[ ! "$REQUESTED" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::'$REQUESTED' is not a release version such as 0.1.0"
+              exit 1
+            fi
+            echo "version=$REQUESTED" >> "$GITHUB_OUTPUT"
+            echo "pinned=true" >> "$GITHUB_OUTPUT"
+          else
+            latest="$(curl -fsSL https://pypi.org/pypi/mcp-relay/json | jq -r .info.version)"
+            echo "version=$latest" >> "$GITHUB_OUTPUT"
+            echo "pinned=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  install:
+    name: install ${{ matrix.label }}
+    needs: expected
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux
+          - os: windows-latest
+            label: windows
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A release just published can take a few minutes to reach every PyPI
+      # mirror, so a failed attempt is retried before the job fails.
+      - name: One-line installer installs the expected release
+        env:
+          EXPECTED: ${{ needs.expected.outputs.version }}
+          PINNED: ${{ needs.expected.outputs.pinned }}
+          LABEL: ${{ matrix.label }}
+          MCP_RELAY_SETUP: skip
+          MCP_RELAY_SKIP_PATH_UPDATE: "1"
+        run: |
+          if [ "$PINNED" = true ]; then
+            export MCP_RELAY_VERSION="$EXPECTED"
+          fi
+          for attempt in 1 2 3 4 5 6; do
+            if [ "$LABEL" = windows ]; then
+              powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 2>&1 | tee install.log || true
+            else
+              bash scripts/install.sh 2>&1 | tee install.log || true
+            fi
+            if tr -d '\r' < install.log | grep -qx "mcp-relay $EXPECTED installed for the current user."; then
+              exit 0
+            fi
+            echo "::warning::attempt $attempt did not install mcp-relay $EXPECTED"
+            sleep 30
+          done
+          echo "::error::the installer did not install mcp-relay $EXPECTED"
+          exit 1

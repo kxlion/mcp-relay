@@ -10,33 +10,37 @@ The CI workflow runs for pushes to `main` and pull requests targeting `main`.
 It validates changes without publishing packages, creating releases or deploying
 infrastructure. Publishing to PyPI and to GitHub Container Registry are separate
 workflows, described in [Release to PyPI](#release-to-pypi) and
-[Docker image](#docker-image).
+[Docker image](#docker-image). The one-line installers are also checked against
+PyPI, see [Installers](#installers).
 
 ## Pipeline
 
 ```mermaid
 flowchart LR
-    Checks[checks - Linux] --> Linux[e2e linux]
-    Checks --> Windows[e2e windows]
-    Linux --> Gate[ci-required]
-    Windows --> Gate
-    Checks --> Gate
+    Checks[checks - Linux] --> Gate[ci-required]
+    UnitL[unit linux] --> Gate
+    UnitW[unit windows] --> Gate
+    E2EL[e2e linux] --> Gate
+    E2EW[e2e windows] --> Gate
+    Docker[docker - Linux amd64] --> Gate
 ```
 
 | Job | Runs | What a passing result establishes |
 |---|---|---|
-| `checks` | Lockfile check, Ruff, diff whitespace check and non-integration tests on Linux | These checks pass for that commit on Linux |
-| `e2e linux` | Installer, installed CLI smoke checks and integration tests on Ubuntu | The exercised installation and integration paths pass on Linux |
-| `e2e windows` | Installer, installed CLI smoke checks and integration tests on Windows | The exercised installation and integration paths pass on Windows |
-| `ci-required` | Aggregate result check | `checks` and the entire E2E matrix succeeded |
+| `checks` | Lockfile check, diff whitespace check, Ruff, actionlint, zizmor and shellcheck on Linux | The code, workflows and shell scripts pass these static checks |
+| `unit linux`, `unit windows` | Non-integration tests | The unit suite passes on that platform |
+| `e2e linux`, `e2e windows` | Installer, installed CLI smoke checks and integration tests | The exercised installation and integration paths pass on that platform |
+| `docker` | Builds the Dockerfile for `linux/amd64` and runs the image smoke test | The image builds and its Relay Server starts and authenticates |
+| `ci-required` | Aggregate result check | Every job above and every matrix leg succeeded |
 
-The E2E matrix starts only after `checks` succeeds. Matrix jobs continue
-independently when one fails. The aggregate gate fails if a required result is
-failed, cancelled, skipped or absent; only success satisfies it.
+All jobs start in parallel. Matrix jobs continue independently when one fails.
+The aggregate gate fails if a required result is failed, cancelled, skipped or
+absent; only success satisfies it.
 
-`checks` also verifies that its test run did not modify tracked files. A local
-working tree with intentional documentation edits will not satisfy that clean
-checkout assertion; it is a CI hygiene check, not a command to discard changes.
+Each `unit` job also verifies that its test run did not modify tracked files. A
+local working tree with intentional documentation edits will not satisfy that
+clean checkout assertion; it is a CI hygiene check, not a command to discard
+changes.
 
 ## What the E2E bench exercises
 
@@ -66,7 +70,8 @@ JUnit artifact:
 
 | Artifact | File | Retention |
 |---|---|---|
-| `reports-checks` | `reports/unit.xml` | 7 days |
+| `reports-unit-linux` | `reports/unit.xml` | 7 days |
+| `reports-unit-windows` | `reports/unit.xml` | 7 days |
 | `reports-e2e-linux` | `reports/integration.xml` | 7 days |
 | `reports-e2e-windows` | `reports/integration.xml` | 7 days |
 
@@ -74,9 +79,10 @@ Reports are uploaded after a job finishes even when tests fail, unless the run
 is cancelled. A missing report causes the upload step to fail.
 
 Pytest's `-ra` summary lists skips and their reasons. Current conditional cases
-include Windows `SIGINT` subprocess delivery, unavailable signal constants,
-unavailable symbolic-link support and a missing non-loopback interface for the
-network-isolation test. A skipped check is not evidence that its path passed.
+include POSIX file mode and owner checks on Windows, Windows `SIGINT`
+subprocess delivery, unavailable signal constants, unavailable symbolic-link
+support and a missing non-loopback interface for the network-isolation test. A
+skipped check is not evidence that its path passed.
 
 Review `ci-required` on the exact commit being merged. Whether GitHub enforces it
 through branch protection or rulesets is a repository setting, not established
@@ -95,25 +101,40 @@ uv run --frozen python -m pytest -q -ra -m "not integration"
 uv run --frozen python -m pytest -q -ra -m integration
 ```
 
+When a change touches `.github/` or a shell script, also run the linters of the
+`checks` job. They are locked in the `dev` dependency group:
+
+```sh
+uv run --frozen actionlint
+uv run --frozen zizmor --offline .github
+uv run --frozen shellcheck scripts/*.sh .github/scripts/*.sh
+```
+
 Run the narrowest relevant tests first while making a change. The integration
 suite needs Node/npx and access to download its pinned fixture. Without
 `MCP_RELAY_BIN`, the E2E bench uses the checkout; that is not proof of the
-installed-command path exercised by CI.
+installed-command path exercised by CI. Every test runs with an isolated home
+directory, so the suite never reads or writes your real `~/.mcp-relay`.
 
-The full non-integration suite is run on Linux in CI. Running it on Windows can
-expose platform assumptions that the CI integration matrix does not cover.
 Report the actual command, platform, pass/fail/skip counts and relevant failures.
 Local results do not establish the current state of a GitHub Actions run.
 
 ## Workflow safeguards
 
-The workflow grants `contents: read`, pins actions to commit SHAs and disables
-checkout credential persistence. Setup-uv manages dependency caching. Superseded
-runs on the same pull request or ref are cancelled; unrelated refs do not share
-that concurrency group.
+The workflows grant `contents: read` by default and widen it per job only where
+needed, with a comment. Actions are pinned to commit SHAs and checkout
+credential persistence is disabled. Setup-uv manages dependency caching. A new
+push to a pull request cancels that pull request's previous run; each commit on
+`main` keeps its own result, and unrelated refs do not share a concurrency
+group.
 
-The workflow file is the source of truth for job steps, action revisions,
-timeouts and artifacts. Keep this guide aligned when those change.
+[Dependabot](../.github/dependabot.yml) proposes monthly grouped updates for the
+pinned actions (SHA and version comment together) and for `uv.lock`, each only
+after a release is a week old. These pull requests go through CI like any other.
+
+The workflow files are the source of truth for job steps, action revisions,
+timeouts and artifacts. Keep this guide aligned when those change. Helper
+scripts shared by several workflows live in `.github/scripts/`.
 
 ## Release to PyPI
 
@@ -122,19 +143,22 @@ GitHub release is published. It never runs on pushes or pull requests.
 
 | Job | Runs | What a passing result establishes |
 |---|---|---|
-| `build` | Checks that the release tag equals `v` + the `pyproject.toml` version, then builds the sdist and wheel | The tagged commit builds with the declared version |
+| `build` | Checks that the release tag equals `v` + the `pyproject.toml` version and that `ci-required` succeeded on the tagged commit, builds the sdist and wheel, then installs each one in an isolated environment and checks `mcp-relay --version` | The tagged commit passed CI, and both distributions install and report the declared version |
 | `publish to PyPI` | Uploads the built files with `uv publish` | PyPI accepted the files for that version |
+| `one-line installers` | Runs the [Installers](#installers) workflow for that version | Both one-line installers install the new release from PyPI |
 
 Publishing uses PyPI Trusted Publishing: PyPI trusts the `release.yml`
 workflow of this repository in the `pypi` environment, and GitHub issues a
 short-lived OIDC token to the `publish` job only. No PyPI token is stored in
-the repository or its secrets. The `build` job has read-only permissions.
+the repository or its secrets. The `build` job has read-only permissions, plus
+`checks: read` to read the CI result.
 
 To release:
 
 1. Set the new `version` in `pyproject.toml` and merge it to `main`.
-2. Confirm `ci-required` succeeded on that commit. The release workflow does
-   not rerun the test suite.
+2. Wait for `ci-required` to succeed on that commit. The release workflow does
+   not rerun the test suite; it refuses a commit whose latest `ci-required`
+   run did not succeed.
 3. Publish a GitHub release whose tag is `v<version>` on that commit.
 
 A PyPI version cannot be uploaded twice. A failed `build` publishes nothing;
@@ -146,12 +170,15 @@ yanked, then superseded by a new version.
 The [Docker image workflow](../.github/workflows/docker.yml) runs when a GitHub
 release is published, or manually for an existing release tag
 (`gh workflow run docker.yml -f tag=v<version>`). It checks out that tag and
-fails if the tag does not equal `v` + the `pyproject.toml` version.
+fails if the tag does not equal `v` + the `pyproject.toml` version or if
+`ci-required` did not succeed on the tagged commit. Its helper scripts come
+from the workflow's own commit, so a manual run for an older tag uses the
+current smoke test.
 
 | Job | Runs | What a passing result establishes |
 |---|---|---|
-| `prepare` | Resolves the tag and checks it against the package version | The tag names a release of the declared version |
-| `build amd64`, `build arm64` | One job per architecture, each on a native runner (`ubuntu-24.04`, `ubuntu-24.04-arm`): build, smoke test, push by digest | That architecture's image reports the release version, starts `mcp-relay server` from environment variables only, answers `401` to an unauthenticated `/mcp` request and `200` to an authenticated `initialize`, and was pushed |
+| `prepare` | Resolves the tag, checks it against the package version and the CI result | The tag names a release of the declared version that passed CI |
+| `build amd64`, `build arm64` | One job per architecture, each on a native runner (`ubuntu-24.04`, `ubuntu-24.04-arm`): build, [smoke test](../.github/scripts/docker-smoke.sh), push by digest | That architecture's image reports the release version, starts `mcp-relay server` from environment variables only, answers `401` to an unauthenticated `/mcp` request and `200` to an authenticated `initialize`, and was pushed |
 | `publish multi-arch tags` | Combines both digests under `<version>`, `<major>.<minor>` and, for the newest release, `latest` | `ghcr.io/kxlion/mcp-relay` serves both architectures under those tags |
 
 The pushed image is rebuilt from the smoke-test build's cache, so its layers
@@ -160,4 +187,23 @@ architectures pass. The `latest` tag moves only when the built tag is the
 repository's latest release, so rebuilding an older release does not change it.
 The smoke test uses single-use random tokens. The jobs push with their own
 `GITHUB_TOKEN` (`packages: write`); no registry credential is stored in the
-repository.
+repository. The CI `docker` job runs the same smoke test on every change, for
+`linux/amd64` only and without pushing.
+
+## Installers
+
+The [installers workflow](../.github/workflows/installers.yml) runs
+`scripts/install.sh` on Ubuntu and `scripts/install.ps1` on Windows the way a
+user does, without `MCP_RELAY_PROJECT_ROOT`, so the package comes from PyPI.
+Each job passes when the installer reports the expected version as installed.
+
+| Trigger | Installs | Expected version |
+|---|---|---|
+| Weekly schedule | Latest release | The latest version on PyPI |
+| After a PyPI release | `MCP_RELAY_VERSION=<version>` | That release |
+| Manual (`gh workflow run installers.yml [-f version=<version>]`) | The given release, or the latest | That release, or the latest on PyPI |
+
+A release can take a few minutes to reach every PyPI mirror, so each job
+retries a failed installation for a few minutes before failing. CI's `e2e`
+jobs cover the installers against the checkout; this workflow covers the
+PyPI path documented in the README.
