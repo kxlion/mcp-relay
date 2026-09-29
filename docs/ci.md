@@ -148,13 +148,16 @@ release is published, or manually for an existing release tag
 (`gh workflow run docker.yml -f tag=v<version>`). It checks out that tag and
 fails if the tag does not equal `v` + the `pyproject.toml` version.
 
-| Step | What a passing result establishes |
-|---|---|
-| Smoke test | The `linux/amd64` image reports the release version, starts `mcp-relay server` from environment variables only, answers `401` to an unauthenticated `/mcp` request and `200` to an authenticated `initialize` |
-| Push | `ghcr.io/kxlion/mcp-relay` received the `linux/amd64` and `linux/arm64` image under `<version>` and `<major>.<minor>` |
+| Job | Runs | What a passing result establishes |
+|---|---|---|
+| `prepare` | Resolves the tag and checks it against the package version | The tag names a release of the declared version |
+| `build amd64`, `build arm64` | One job per architecture, each on a native runner (`ubuntu-24.04`, `ubuntu-24.04-arm`): build, smoke test, push by digest | That architecture's image reports the release version, starts `mcp-relay server` from environment variables only, answers `401` to an unauthenticated `/mcp` request and `200` to an authenticated `initialize`, and was pushed |
+| `publish multi-arch tags` | Combines both digests under `<version>`, `<major>.<minor>` and, for the newest release, `latest` | `ghcr.io/kxlion/mcp-relay` serves both architectures under those tags |
 
-The `latest` tag moves only when the built tag is the repository's latest
-release, so rebuilding an older release does not change it. The smoke test uses
-single-use random tokens and does not exercise the `linux/arm64` image beyond
-its build. The job pushes with its own `GITHUB_TOKEN` (`packages: write`); no
-registry credential is stored in the repository.
+The pushed image is rebuilt from the smoke-test build's cache, so its layers
+are the tested ones; only its labels differ. No tag is published unless both
+architectures pass. The `latest` tag moves only when the built tag is the
+repository's latest release, so rebuilding an older release does not change it.
+The smoke test uses single-use random tokens. The jobs push with their own
+`GITHUB_TOKEN` (`packages: write`); no registry credential is stored in the
+repository.

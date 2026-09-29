@@ -1,7 +1,8 @@
 # Container image for mcp-relay: when a GitHub release is published (or on a
-# manual run for an existing release tag), build the Dockerfile at that tag,
-# smoke-test the Relay Server in the container, then push a linux/amd64 +
-# linux/arm64 image to ghcr.io with the job's GITHUB_TOKEN.
+# manual run for an existing release tag), build the Dockerfile at that tag on
+# a native runner per architecture, smoke-test the Relay Server in each image,
+# push each image by digest, then publish one multi-arch tag set on ghcr.io.
+# Pushes use the job's GITHUB_TOKEN; no registry credential is stored.
 #
 # Third-party actions are pinned to full commit SHAs (version in comment).
 name: Docker image
@@ -31,13 +32,15 @@ env:
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
-  image:
-    name: build, smoke-test and push
+  prepare:
+    name: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      packages: write
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      latest: ${{ steps.latest.outputs.enable }}
+      revision: ${{ steps.source.outputs.revision }}
     steps:
       - name: Resolve the release tag
         id: tag
@@ -82,26 +85,52 @@ jobs:
           fi
           echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+  build:
+    name: build ${{ matrix.arch }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Build the amd64 image for the smoke test
+      - name: Build the image for the smoke test
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           load: true
           push: false
           tags: mcp-relay:smoke
-          cache-to: type=gha,mode=max
 
       - name: Smoke-test the Relay Server in the container
         env:
-          VERSION: ${{ steps.tag.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ARCH: ${{ matrix.arch }}
         run: |
+          actual_arch="$(docker image inspect mcp-relay:smoke --format '{{.Architecture}}')"
+          if [ "$actual_arch" != "$ARCH" ]; then
+            echo "::error::image architecture is '$actual_arch', expected '$ARCH'"
+            exit 1
+          fi
+
           reported="$(docker run --rm mcp-relay:smoke --version)"
           if [ "$reported" != "mcp-relay $VERSION" ]; then
             echo "::error::image reports '$reported', expected 'mcp-relay $VERSION'"
@@ -149,26 +178,99 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Image tags and labels
+      - name: Image labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.revision }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+
+      # Same builder and inputs as the smoke-test build, so every layer comes
+      # from its cache: only the image labels differ from the tested image.
+      - name: Push the image by digest
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - name: Upload the digest
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  merge:
+    name: publish multi-arch tags
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download the digests
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
           flavor: latest=false
           tags: |
-            type=semver,pattern={{version}},value=${{ steps.tag.outputs.tag }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.tag.outputs.tag }}
-            type=raw,value=latest,enable=${{ steps.latest.outputs.enable }}
-          labels: |
-            org.opencontainers.image.revision=${{ steps.source.outputs.revision }}
-            org.opencontainers.image.version=${{ steps.tag.outputs.version }}
+            type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.prepare.outputs.tag }}
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.latest }}
 
-      - name: Build and push linux/amd64 and linux/arm64
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
+      - name: Create the multi-arch tags
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          count="$(find . -maxdepth 1 -type f | wc -l)"
+          if [ "$count" != 2 ]; then
+            echo "::error::expected 2 image digests, found $count"
+            exit 1
+          fi
+          tag_args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && tag_args+=(-t "$tag")
+          done <<< "$TAGS"
+          sources=()
+          for digest in *; do
+            sources+=("$IMAGE@sha256:$digest")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+
+      - name: Inspect the published image
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: docker buildx imagetools inspect "$IMAGE:$VERSION"
