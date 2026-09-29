@@ -100,7 +100,7 @@ git diff --check
 - Tokens (Relay Client Token, public MCP access token) never appear in the
   YAML configuration nor in `config show` output.
 - Relay-owned output never exposes API keys.
-- Relayed third-party payloads pass through without secret scanning — the
+- Relayed third-party payloads pass through without secret scanning - the
   relay owns transport and bounds, not payload policy.
 - Never commit credentials, tokens, personal data, or unsanitized artifacts
   to the repository.

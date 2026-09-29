@@ -14,7 +14,7 @@ infrastructure.
 
 ```mermaid
 flowchart LR
-    Checks[checks — Linux] --> Linux[e2e linux]
+    Checks[checks - Linux] --> Linux[e2e linux]
     Checks --> Windows[e2e windows]
     Linux --> Gate[ci-required]
     Windows --> Gate

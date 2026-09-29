@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="496" viewBox="0 0 900 496" role="img" aria-label="MCP Relay demo: start the Server, start the Client, then an MCP client lists and calls a local tool through the relay">
+<style>text{font:14px ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;white-space:pre}.l{opacity:0}@keyframes a0{0%,3.604%{opacity:0}3.664%,96.396%{opacity:1}100%{opacity:0}}.a0{animation:a0 16.65s linear infinite}@keyframes a1{0%,6.607%{opacity:0}6.667%,96.396%{opacity:1}100%{opacity:0}}.a1{animation:a1 16.65s linear infinite}@keyframes c1{0%,6.607%{transform:translateX(0)}10.931%,100%{transform:translateX(138.4px)}}.c1{animation:c1 16.65s steps(16,end) infinite}@keyframes a2{0%,13.634%{opacity:0}13.694%,96.396%{opacity:1}100%{opacity:0}}.a2{animation:a2 16.65s linear infinite}@keyframes a3{0%,14.955%{opacity:0}15.015%,96.396%{opacity:1}100%{opacity:0}}.a3{animation:a3 16.65s linear infinite}@keyframes a5{0%,18.078%{opacity:0}18.138%,96.396%{opacity:1}100%{opacity:0}}.a5{animation:a5 16.65s linear infinite}@keyframes a6{0%,21.081%{opacity:0}21.141%,96.396%{opacity:1}100%{opacity:0}}.a6{animation:a6 16.65s linear infinite}@keyframes c6{0%,21.081%{transform:translateX(0)}25.405%,100%{transform:translateX(138.4px)}}.c6{animation:c6 16.65s steps(16,end) infinite}@keyframes a7{0%,28.108%{opacity:0}28.168%,96.396%{opacity:1}100%{opacity:0}}.a7{animation:a7 16.65s linear infinite}@keyframes a8{0%,29.429%{opacity:0}29.489%,96.396%{opacity:1}100%{opacity:0}}.a8{animation:a8 16.65s linear infinite}@keyframes a9{0%,30.751%{opacity:0}30.811%,96.396%{opacity:1}100%{opacity:0}}.a9{animation:a9 16.65s linear infinite}@keyframes a11{0%,33.874%{opacity:0}33.934%,96.396%{opacity:1}100%{opacity:0}}.a11{animation:a11 16.65s linear infinite}@keyframes a12{0%,36.877%{opacity:0}36.937%,96.396%{opacity:1}100%{opacity:0}}.a12{animation:a12 16.65s linear infinite}@keyframes c12{0%,36.877%{transform:translateX(0)}39.880%,100%{transform:translateX(88.0px)}}.c12{animation:c12 16.65s steps(10,end) infinite}@keyframes a13{0%,42.583%{opacity:0}42.643%,96.396%{opacity:1}100%{opacity:0}}.a13{animation:a13 16.65s linear infinite}@keyframes a14{0%,43.904%{opacity:0}43.964%,96.396%{opacity:1}100%{opacity:0}}.a14{animation:a14 16.65s linear infinite}@keyframes c14{0%,43.904%{transform:translateX(0)}47.147%,100%{transform:translateX(104.8px)}}.c14{animation:c14 16.65s steps(12,end) infinite}@keyframes a15{0%,49.850%{opacity:0}49.910%,96.396%{opacity:1}100%{opacity:0}}.a15{animation:a15 16.65s linear infinite}@keyframes a16{0%,51.171%{opacity:0}51.231%,96.396%{opacity:1}100%{opacity:0}}.a16{animation:a16 16.65s linear infinite}@keyframes c16{0%,51.171%{transform:translateX(0)}61.982%,100%{transform:translateX(340.0px)}}.c16{animation:c16 16.65s steps(40,end) infinite}@keyframes a17{0%,64.685%{opacity:0}64.745%,96.396%{opacity:1}100%{opacity:0}}.a17{animation:a17 16.65s linear infinite}@keyframes a18{0%,66.006%{opacity:0}66.066%,96.396%{opacity:1}100%{opacity:0}}.a18{animation:a18 16.65s linear infinite}@keyframes a19{0%,67.327%{opacity:0}67.387%,96.396%{opacity:1}100%{opacity:0}}.a19{animation:a19 16.65s linear infinite}@keyframes a20{0%,68.649%{opacity:0}68.709%,96.396%{opacity:1}100%{opacity:0}}.a20{animation:a20 16.65s linear infinite}</style>
+<defs><clipPath id="win"><rect width="900" height="496" rx="10"/></clipPath></defs>
+<g clip-path="url(#win)">
+<rect width="900" height="496" fill="#0d1117"/>
+<rect width="900" height="34" fill="#161b22"/>
+<circle cx="20" cy="17" r="6" fill="#ff5f57"/><circle cx="40" cy="17" r="6" fill="#febc2e"/><circle cx="60" cy="17" r="6" fill="#28c840"/>
+<text x="450.0" y="22" fill="#7d8590" text-anchor="middle" style="font-size:13px">mcp-relay - real local run</text>
+<text class="l a0" x="22" y="66" fill="#7d8590"># 1. On the cloud host</text>
+<text class="l a1" x="22" y="86"><tspan fill="#d29922">$ </tspan><tspan fill="#e6edf3">mcp-relay server</tspan></text>
+<rect class="c1" x="38.8" y="71" width="138.4" height="20" fill="#0d1117"/>
+<text class="l a2" x="22" y="106"><tspan fill="#3fb950">INFO </tspan><tspan fill="#e6edf3"> StreamableHTTP session manager started</tspan></text>
+<text class="l a3" x="22" y="126"><tspan fill="#3fb950">INFO </tspan><tspan fill="#e6edf3"> Application startup complete.</tspan></text>
+<text class="l a5" x="22" y="166" fill="#7d8590"># 2. On your computer: config.yaml declares `localtools`, a local stdio MCP server</text>
+<text class="l a6" x="22" y="186"><tspan fill="#d29922">$ </tspan><tspan fill="#e6edf3">mcp-relay client</tspan></text>
+<rect class="c6" x="38.8" y="171" width="138.4" height="20" fill="#0d1117"/>
+<text class="l a7" x="22" y="206"><tspan fill="#3fb950">INFO </tspan><tspan fill="#e6edf3"> WebSocket connection established</tspan></text>
+<text class="l a8" x="22" y="226"><tspan fill="#3fb950">INFO </tspan><tspan fill="#e6edf3"> authenticated registration succeeded for client 00c16254…</tspan></text>
+<text class="l a9" x="22" y="246"><tspan fill="#3fb950">INFO </tspan><tspan fill="#e6edf3"> tool catalog published (2 tools)</tspan></text>
+<text class="l a11" x="22" y="286" fill="#7d8590"># 3. Your AI agent's MCP connection (here: a Python MCP client)</text>
+<text class="l a12" x="22" y="306"><tspan fill="#56d4dd">→ </tspan><tspan fill="#79c0ff">tools/list</tspan></text>
+<rect class="c12" x="38.8" y="291" width="88.0" height="20" fill="#0d1117"/>
+<text class="l a13" x="38.8" y="326" fill="#e6edf3">relay_status  relay_registry_search  localtools_list_dir  localtools_read_file</text>
+<text class="l a14" x="22" y="346"><tspan fill="#56d4dd">→ </tspan><tspan fill="#79c0ff">relay_status</tspan></text>
+<rect class="c14" x="38.8" y="331" width="104.8" height="20" fill="#0d1117"/>
+<text class="l a15" x="38.8" y="366" fill="#e6edf3">client: connected=true report=live   localtools: running, stdio, 2 tools</text>
+<text class="l a16" x="22" y="386"><tspan fill="#56d4dd">→ </tspan><tspan fill="#79c0ff">localtools_read_file {"path": "todo.md"}</tspan></text>
+<rect class="c16" x="38.8" y="371" width="340.0" height="20" fill="#0d1117"/>
+<text class="l a17" x="38.8" y="406" fill="#e6edf3"># Today</text>
+<text class="l a18" x="38.8" y="426" fill="#e6edf3">- Review the relay PR</text>
+<text class="l a19" x="38.8" y="446" fill="#e6edf3">- Reply to the design thread</text>
+<text class="l a20" x="38.8" y="466" fill="#e6edf3">- Ship v0.1.0</text>
+</g>
+</svg>

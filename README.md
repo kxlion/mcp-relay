@@ -9,7 +9,16 @@ through a single remote endpoint.
 
 **Windows & Linux · Outbound connection · Your choice of MCP servers**
 
-[Get started](#get-started) · [How it works](#how-it-works) · [Guides](#guides)
+[![CI](https://github.com/kxlion/mcp-relay/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kxlion/mcp-relay/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](pyproject.toml)
+
+[Get started](#get-started) · [How it works](#how-it-works) · [Why MCP Relay?](#why-mcp-relay) · [Guides](#guides)
+
+<img src="docs/assets/demo.svg" alt="MCP Relay demo: start the Server, start the Client, then an MCP client lists and calls a local tool through the relay" width="860">
+
+<sub>A real local run: Server, Client and a small stdio MCP server on one machine,
+called from a Python MCP client.</sub>
 
 </div>
 
@@ -59,6 +68,21 @@ You can also let your AI manage the configured servers by explicitly enabling
 administration on the local Client. This is optional and disabled unless you
 set `admin: true`.
 
+## Why MCP Relay?
+
+| You want to... | With a plain tunnel | With MCP Relay |
+|---|---|---|
+| Expose several MCP servers | One public URL and one auth setup per server | One endpoint; each server published under its own alias |
+| Use `stdio` MCP servers | Needs a separate stdio-to-HTTP bridge | Launched and relayed by the local Client |
+| Limit what the AI sees | Everything the server offers is exposed | Per-server `tools:` allowlist |
+| Know whether your computer is reachable | Guess from timeouts | `relay_status` reports the whole chain |
+| Survive network drops | Depends on the tunnel | The Client reconnects and the tool list updates itself |
+
+MCP Relay still needs a public HTTPS/WSS address for its Server: a cloud host
+behind a TLS reverse proxy, or a secure tunnel in front of the Server. Tools
+such as `mcp-remote` solve the opposite problem, connecting a local MCP client
+to a remote server.
+
 ## Get started
 
 You need a cloud AI agent supporting MCP over Streamable HTTP with an
@@ -68,13 +92,13 @@ proxy or secure tunnel. MCP Relay does not provision hosting, DNS or TLS.
 
 ### 1. Install on the cloud host and your computer
 
-**Linux** — requires Bash, `curl` and `tar`:
+**Linux** - requires Bash, `curl` and `tar`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kxlion/mcp-relay/main/scripts/install.sh | bash
 ```
 
-**Windows** — PowerShell 5.1 or newer:
+**Windows** - PowerShell 5.1 or newer:
 
 ```powershell
 iex (irm https://raw.githubusercontent.com/kxlion/mcp-relay/main/scripts/install.ps1)

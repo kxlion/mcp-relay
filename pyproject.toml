@@ -1,11 +1,12 @@
 [project]
 name = "mcp-relay"
 version = "0.1.0"
-description = "Constrained MCP relay for explicitly enabled local capabilities"
+description = "Use your local MCP servers from a cloud AI agent through one authenticated endpoint"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.14"
+keywords = ["mcp", "model-context-protocol", "relay", "ai-agents", "websocket"]
 dependencies = [
     "fastapi>=0.115,<1",
     "fastmcp>=4,<5",
@@ -18,6 +19,11 @@ dependencies = [
     "uvicorn>=0.30,<1",
     "websockets>=17,<18",
 ]
+
+[project.urls]
+Homepage = "https://github.com/kxlion/mcp-relay"
+Documentation = "https://github.com/kxlion/mcp-relay#readme"
+Issues = "https://github.com/kxlion/mcp-relay/issues"
 
 [project.scripts]
 mcp-relay = "mcp_relay.cli:main"
