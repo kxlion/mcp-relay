@@ -7,6 +7,17 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.14"
 keywords = ["mcp", "model-context-protocol", "relay", "ai-agents", "websocket"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: Proxy Servers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "fastapi>=0.115,<1",
     "fastmcp>=4,<5",

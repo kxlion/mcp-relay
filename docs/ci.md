@@ -6,9 +6,10 @@ This reference explains what the repository's automated checks run and how to
 read their results. It is for contributors and reviewers; installation and
 normal use are covered by the README and [CLI guide](cli.md).
 
-The workflow runs for pushes to `main` and pull requests targeting `main`.
+The CI workflow runs for pushes to `main` and pull requests targeting `main`.
 It validates changes without publishing packages, creating releases or deploying
-infrastructure.
+infrastructure. Publishing to PyPI is a separate workflow, described in
+[Release to PyPI](#release-to-pypi).
 
 ## Pipeline
 
@@ -112,3 +113,29 @@ that concurrency group.
 
 The workflow file is the source of truth for job steps, action revisions,
 timeouts and artifacts. Keep this guide aligned when those change.
+
+## Release to PyPI
+
+The [release workflow](../.github/workflows/release.yml) runs only when a
+GitHub release is published. It never runs on pushes or pull requests.
+
+| Job | Runs | What a passing result establishes |
+|---|---|---|
+| `build` | Checks that the release tag equals `v` + the `pyproject.toml` version, then builds the sdist and wheel | The tagged commit builds with the declared version |
+| `publish to PyPI` | Uploads the built files with `uv publish` | PyPI accepted the files for that version |
+
+Publishing uses PyPI Trusted Publishing: PyPI trusts the `release.yml`
+workflow of this repository in the `pypi` environment, and GitHub issues a
+short-lived OIDC token to the `publish` job only. No PyPI token is stored in
+the repository or its secrets. The `build` job has read-only permissions.
+
+To release:
+
+1. Set the new `version` in `pyproject.toml` and merge it to `main`.
+2. Confirm `ci-required` succeeded on that commit. The release workflow does
+   not rerun the test suite.
+3. Publish a GitHub release whose tag is `v<version>` on that commit.
+
+A PyPI version cannot be uploaded twice. A failed `build` publishes nothing;
+fix the cause and publish a new release. A version already on PyPI can only be
+yanked, then superseded by a new version.

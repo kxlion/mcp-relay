@@ -10,12 +10,12 @@ through a single remote endpoint.
 **Windows & Linux · Outbound connection · Your choice of MCP servers**
 
 [![CI](https://github.com/kxlion/mcp-relay/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kxlion/mcp-relay/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/kxlion/mcp-relay/blob/main/LICENSE)
+[![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://github.com/kxlion/mcp-relay/blob/main/pyproject.toml)
 
 [Get started](#get-started) · [How it works](#how-it-works) · [Why MCP Relay?](#why-mcp-relay) · [Guides](#guides)
 
-<img src="docs/assets/demo.svg" alt="MCP Relay demo: start the Server, start the Client, then an MCP client lists and calls a local tool through the relay" width="860">
+<img src="https://raw.githubusercontent.com/kxlion/mcp-relay/main/docs/assets/demo.svg" alt="MCP Relay demo: start the Server, start the Client, then an MCP client lists and calls a local tool through the relay" width="860">
 
 <sub>A real local run: Server, Client and a small stdio MCP server on one machine,
 called from a Python MCP client.</sub>
@@ -223,7 +223,7 @@ mcp_servers:
 Replace that URL with your server's address. For a server launched as a local
 process, use `command` with its executable and arguments instead of `url`.
 Registry-based declarations use `source`. Add `tools:` to publish only some of
-a server's tools. See the [server configuration reference](docs/tools.md) for
+a server's tools. See the [server configuration reference](https://github.com/kxlion/mcp-relay/blob/main/docs/tools.md) for
 the entry formats and per-server credentials.
 
 You choose and configure the underlying MCP servers separately; Relay does not
@@ -269,7 +269,7 @@ Ask your AI agent to:
 
 A `live` Client report confirms the round trip to your computer. Your servers'
 tools are then called like any other MCP tool. See the
-[tool guide](docs/tools.md) for naming, filtering and error handling.
+[tool guide](https://github.com/kxlion/mcp-relay/blob/main/docs/tools.md) for naming, filtering and error handling.
 
 ## Choose whether your AI can manage servers
 
@@ -305,7 +305,7 @@ accordingly. Third-party results are relayed without scanning them for secrets.
 
 Use `mcp-relay config show` to inspect effective settings with secrets redacted.
 Logs are written to `~/.mcp-relay/server.log` and `client.log`.
-The [CLI guide](docs/cli.md) covers configuration and diagnostics.
+The [CLI guide](https://github.com/kxlion/mcp-relay/blob/main/docs/cli.md) covers configuration and diagnostics.
 
 <details>
 <summary>Can I run everything on one computer?</summary>
@@ -333,8 +333,8 @@ preserved. Data removal is a separate manual step.
 
 ## Guides
 
-[CLI and configuration](docs/cli.md) ·
-[Tools and server management](docs/tools.md) ·
-[Security policy](SECURITY.md)
+[CLI and configuration](https://github.com/kxlion/mcp-relay/blob/main/docs/cli.md) ·
+[Tools and server management](https://github.com/kxlion/mcp-relay/blob/main/docs/tools.md) ·
+[Security policy](https://github.com/kxlion/mcp-relay/blob/main/SECURITY.md)
 
-Licensed under the [MIT License](LICENSE).
+Licensed under the [MIT License](https://github.com/kxlion/mcp-relay/blob/main/LICENSE).
