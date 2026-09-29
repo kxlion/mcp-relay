@@ -10,6 +10,7 @@ through a single remote endpoint.
 **Windows & Linux · Outbound connection · Your choice of MCP servers**
 
 [![CI](https://github.com/kxlion/mcp-relay/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kxlion/mcp-relay/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/mcp-relay.svg)](https://pypi.org/project/mcp-relay/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/kxlion/mcp-relay/blob/main/LICENSE)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://github.com/kxlion/mcp-relay/blob/main/pyproject.toml)
 
@@ -92,6 +93,18 @@ proxy or secure tunnel. MCP Relay does not provision hosting, DNS or TLS.
 
 ### 1. Install on the cloud host and your computer
 
+MCP Relay is published on [PyPI](https://pypi.org/project/mcp-relay/). With
+[uv](https://docs.astral.sh/uv/) installed:
+
+```bash
+uv tool install mcp-relay
+```
+
+uv downloads Python 3.14 when it is not already available. Guided setup
+(`mcp-relay onboard`) is covered in steps 3 and 4.
+
+Without uv, use the one-line installers instead.
+
 **Linux** - requires Bash, `curl` and `tar`:
 
 ```bash
@@ -111,7 +124,9 @@ a remote Server** on your computer, after preparing the credentials below.
 You can cancel setup and rerun `mcp-relay onboard` when ready.
 
 These commands execute a remote script and install the moving `main` branch.
-Review the scripts before running them if needed. To skip guided setup, set
+To install a release instead, set `MCP_RELAY_REF=v0.1.0` and
+`MCP_RELAY_REF_KIND=tags` in the installer's environment. Review the scripts
+before running them if needed. To skip guided setup, set
 `MCP_RELAY_SETUP=skip` in the installer's environment.
 
 <details>
