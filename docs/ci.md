@@ -128,9 +128,8 @@ push to a pull request cancels that pull request's previous run; each commit on
 `main` keeps its own result, and unrelated refs do not share a concurrency
 group.
 
-[Dependabot](../.github/dependabot.yml) proposes monthly grouped updates for the
-pinned actions (SHA and version comment together) and for `uv.lock`, each only
-after a release is a week old. These pull requests go through CI like any other.
+Pinned actions and `uv.lock` are updated by hand, in a pull request like any
+other change. Update an action's SHA and its version comment together.
 
 The workflow files are the source of truth for job steps, action revisions,
 timeouts and artifacts. Keep this guide aligned when those change. Helper
