@@ -213,6 +213,32 @@ choose private bind addresses it can reach and restrict access with a firewall.
 
 </details>
 
+<details>
+<summary>Run the Server with Docker</summary>
+
+Each release publishes a Server image for `linux/amd64` and `linux/arm64` on
+[GitHub Container Registry](https://github.com/kxlion/mcp-relay/pkgs/container/mcp-relay),
+tagged with its version (`0.1.0`, `0.1`) and `latest`. It needs no configuration
+file: put both tokens in a private `.env` file as plain `KEY=value` lines, then
+run:
+
+```sh
+docker run -d --name mcp-relay --restart unless-stopped --env-file .env \
+  -e RELAY_SERVER_MCP_HOST=0.0.0.0 -e RELAY_SERVER_CLIENT_HOST=0.0.0.0 \
+  -p 127.0.0.1:8000:8000 -p 127.0.0.1:8001:8001 \
+  ghcr.io/kxlion/mcp-relay:latest server
+```
+
+Inside the container the listeners bind every interface so that Docker can
+forward them; the `127.0.0.1` port mappings keep them reachable only from the
+host, for a TLS proxy on the same host. The repository's
+[`docker-compose.yml`](https://github.com/kxlion/mcp-relay/blob/main/docker-compose.yml)
+runs the same Server but publishes both ports on every host interface: restrict
+them with a firewall or change the mappings. The image is for the cloud Server;
+run the Client on your computer, next to your MCP servers.
+
+</details>
+
 ### 4. Connect your local MCP servers
 
 On your computer, run guided setup and choose **Client connected to a remote

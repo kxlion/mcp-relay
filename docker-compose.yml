@@ -2,10 +2,12 @@
 # `ports` publishes both Server listeners to the host; a private Compose-only
 # topology would use `expose` instead and keep the listeners off the host
 # network. Keep credentials in the ignored .env file, never in this file.
+# `docker compose up` pulls the published image; `docker compose build`
+# builds it from this checkout instead.
 services:
   relay-server:
+    image: ghcr.io/kxlion/mcp-relay:latest
     build: .
-    image: mcp-relay
     command: ["server"]
     restart: unless-stopped
     ports:

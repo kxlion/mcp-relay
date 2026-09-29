@@ -8,8 +8,9 @@ normal use are covered by the README and [CLI guide](cli.md).
 
 The CI workflow runs for pushes to `main` and pull requests targeting `main`.
 It validates changes without publishing packages, creating releases or deploying
-infrastructure. Publishing to PyPI is a separate workflow, described in
-[Release to PyPI](#release-to-pypi).
+infrastructure. Publishing to PyPI and to GitHub Container Registry are separate
+workflows, described in [Release to PyPI](#release-to-pypi) and
+[Docker image](#docker-image).
 
 ## Pipeline
 
@@ -139,3 +140,21 @@ To release:
 A PyPI version cannot be uploaded twice. A failed `build` publishes nothing;
 fix the cause and publish a new release. A version already on PyPI can only be
 yanked, then superseded by a new version.
+
+## Docker image
+
+The [Docker image workflow](../.github/workflows/docker.yml) runs when a GitHub
+release is published, or manually for an existing release tag
+(`gh workflow run docker.yml -f tag=v<version>`). It checks out that tag and
+fails if the tag does not equal `v` + the `pyproject.toml` version.
+
+| Step | What a passing result establishes |
+|---|---|
+| Smoke test | The `linux/amd64` image reports the release version, starts `mcp-relay server` from environment variables only, answers `401` to an unauthenticated `/mcp` request and `200` to an authenticated `initialize` |
+| Push | `ghcr.io/kxlion/mcp-relay` received the `linux/amd64` and `linux/arm64` image under `<version>` and `<major>.<minor>` |
+
+The `latest` tag moves only when the built tag is the repository's latest
+release, so rebuilding an older release does not change it. The smoke test uses
+single-use random tokens and does not exercise the `linux/arm64` image beyond
+its build. The job pushes with its own `GITHUB_TOKEN` (`packages: write`); no
+registry credential is stored in the repository.
