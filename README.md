@@ -96,20 +96,20 @@ proxy or secure tunnel. MCP Relay does not provision hosting, DNS or TLS.
 ### 1. Install on the cloud host and your computer
 
 MCP Relay is published on [PyPI](https://pypi.org/project/mcp-relay/). With
-[uv](https://docs.astral.sh/uv/) installed:
+[uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv tool install mcp-relay
 ```
 
-uv downloads Python 3.14 when it is not already available. Guided setup
-(`mcp-relay onboard`) is covered in steps 3 and 4. On the cloud host, you can
-run the Server from its Docker image instead; see
-[Run the Server with Docker](#3-start-the-cloud-server) in step 3.
+uv downloads Python 3.14 when it is not already available. Upgrade later with
+`uv tool upgrade mcp-relay`. To pin a release, for example in a script or CI
+job, install `mcp-relay==0.1.0`.
 
-Without uv, use the one-line installers instead.
+**Without uv**, the one-line installers set up uv, install the same package from
+PyPI for your user account and start guided setup when a terminal is available.
 
-**Linux** - requires Bash, `curl` and `tar`:
+**Linux** - requires Bash and `curl`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kxlion/mcp-relay/main/scripts/install.sh | bash
@@ -121,17 +121,16 @@ curl -fsSL https://raw.githubusercontent.com/kxlion/mcp-relay/main/scripts/insta
 iex (irm https://raw.githubusercontent.com/kxlion/mcp-relay/main/scripts/install.ps1)
 ```
 
-The installers set up `uv`, managed Python 3.14.4 and the `mcp-relay` command for
-your user account. They start guided setup when an interactive terminal is
-available. Choose **Server-only** on your cloud host and **Client connected to
-a remote Server** on your computer, after preparing the credentials below.
-You can cancel setup and rerun `mcp-relay onboard` when ready.
+These commands run a remote script that installs the latest release. In the
+installer's environment, set `MCP_RELAY_VERSION=0.1.0` to pin a release and
+`MCP_RELAY_SETUP=skip` to skip guided setup.
 
-These commands execute a remote script and install the moving `main` branch.
-To install a release instead, set `MCP_RELAY_REF=v0.1.0` and
-`MCP_RELAY_REF_KIND=tags` in the installer's environment. Review the scripts
-before running them if needed. To skip guided setup, set
-`MCP_RELAY_SETUP=skip` in the installer's environment.
+Guided setup (`mcp-relay onboard`) is covered in steps 3 and 4: choose
+**Server-only** on your cloud host and **Client connected to a remote Server**
+on your computer, after preparing the credentials below. On the cloud host, you
+can run the Server from its Docker image instead; see
+[Run the Server with Docker](#3-start-the-cloud-server) in step 3. You can
+cancel setup and rerun `mcp-relay onboard` when ready.
 
 <details>
 <summary>Inspect the installer before running it</summary>

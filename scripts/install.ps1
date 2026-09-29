@@ -6,31 +6,10 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$repository = "https://github.com/kxlion/mcp-relay"
-$sourceRef = if ([string]::IsNullOrWhiteSpace($env:MCP_RELAY_REF)) {
-    "main"
-} else {
-    $env:MCP_RELAY_REF
-}
-$sourceRefKind = if ([string]::IsNullOrWhiteSpace($env:MCP_RELAY_REF_KIND)) {
-    "heads"
-} else {
-    $env:MCP_RELAY_REF_KIND
-}
-$script:pythonVersion = if ([string]::IsNullOrWhiteSpace($env:MCP_RELAY_PYTHON_VERSION)) {
-    "3.14.4"
-} else {
-    $env:MCP_RELAY_PYTHON_VERSION
-}
-
-if ($sourceRefKind -notin @("heads", "tags")) {
-    throw "MCP_RELAY_REF_KIND must be 'heads' or 'tags'."
-}
-if ($sourceRef -notmatch "^[A-Za-z0-9][A-Za-z0-9._/-]*$") {
-    throw "MCP_RELAY_REF contains unsupported characters."
-}
-if ($script:pythonVersion -notmatch "^[0-9]+(\.[0-9]+){1,2}$") {
-    throw "MCP_RELAY_PYTHON_VERSION contains unsupported characters."
+$packageVersion = $env:MCP_RELAY_VERSION
+if (-not [string]::IsNullOrWhiteSpace($packageVersion) -and
+    $packageVersion -notmatch "^[0-9]+(\.[0-9]+){1,2}([a-z]+[0-9]+)?$") {
+    throw "MCP_RELAY_VERSION must be a release version such as 0.1.0."
 }
 
 function Get-UvPath {
@@ -100,39 +79,6 @@ function Ensure-Uv {
     return $uvPath
 }
 
-function Ensure-Python([string] $uvPath) {
-    Write-Host "Installing or verifying Python $script:pythonVersion with uv..."
-    & $uvPath python install $script:pythonVersion
-    if ($LASTEXITCODE -ne 0) {
-        throw "uv python install failed with exit code $LASTEXITCODE."
-    }
-    $env:UV_PYTHON = $script:pythonVersion
-}
-
-function Sync-Project([string] $uvPath) {
-    $syncRootValue = $env:MCP_RELAY_SYNC_ROOT
-    if ([string]::IsNullOrWhiteSpace($syncRootValue)) {
-        return
-    }
-    if (-not (Test-Path -LiteralPath $syncRootValue -PathType Container) -or
-        -not (Test-Path -LiteralPath (Join-Path $syncRootValue "pyproject.toml") -PathType Leaf) -or
-        -not (Test-Path -LiteralPath (Join-Path $syncRootValue "uv.lock") -PathType Leaf)) {
-        throw "MCP_RELAY_SYNC_ROOT is not a locked MCP Relay project: $syncRootValue"
-    }
-
-    $resolvedRoot = (Resolve-Path -LiteralPath $syncRootValue).Path
-    Write-Host "Installing locked MCP Relay dependencies with uv..."
-    Push-Location -LiteralPath $resolvedRoot
-    try {
-        & $uvPath sync --locked
-        if ($LASTEXITCODE -ne 0) {
-            throw "uv sync failed with exit code $LASTEXITCODE."
-        }
-    } finally {
-        Pop-Location
-    }
-}
-
 function Add-UserPathEntry([string] $entry) {
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $entries = @(
@@ -156,37 +102,17 @@ $script:temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("mcp-relay-install
 New-Item -ItemType Directory -Path $script:temporaryRoot -Force | Out-Null
 
 try {
-    $uv = Ensure-Uv
-    Ensure-Python $uv
-    Sync-Project $uv
-
     $projectRoot = $env:MCP_RELAY_PROJECT_ROOT
-    if ([string]::IsNullOrWhiteSpace($projectRoot)) {
-        $archivePath = Join-Path $script:temporaryRoot "mcp-relay.zip"
-        $expandedRoot = Join-Path $script:temporaryRoot "expanded"
-        $archiveSource = $env:MCP_RELAY_ARCHIVE_SOURCE
-        if ([string]::IsNullOrWhiteSpace($archiveSource)) {
-            $archiveUri = "https://codeload.github.com/kxlion/mcp-relay/zip/refs/$sourceRefKind/$sourceRef"
-            Write-Host "Downloading MCP Relay ($sourceRefKind/$sourceRef)..."
-            Invoke-WebRequest -UseBasicParsing -Uri $archiveUri -OutFile $archivePath
-        } elseif (Test-Path -LiteralPath $archiveSource -PathType Leaf) {
-            Copy-Item -LiteralPath $archiveSource -Destination $archivePath -Force
-        } else {
-            throw "MCP_RELAY_ARCHIVE_SOURCE is not a file: $archiveSource"
-        }
-        Expand-Archive -LiteralPath $archivePath -DestinationPath $expandedRoot -Force
-
-        $projects = @(Get-ChildItem -LiteralPath $expandedRoot -Filter "pyproject.toml" -File -Recurse)
-        if ($projects.Count -ne 1) {
-            throw "The downloaded MCP Relay archive did not contain exactly one project."
-        }
-        $projectRoot = $projects[0].Directory.FullName
-    } else {
+    if (-not [string]::IsNullOrWhiteSpace($projectRoot)) {
         if (-not (Test-Path -LiteralPath $projectRoot -PathType Container) -or
             -not (Test-Path -LiteralPath (Join-Path $projectRoot "pyproject.toml") -PathType Leaf)) {
             throw "MCP_RELAY_PROJECT_ROOT is not a valid MCP Relay project: $projectRoot"
         }
-        $projectRoot = (Resolve-Path -LiteralPath $projectRoot).Path
+        $packageSpec = (Resolve-Path -LiteralPath $projectRoot).Path
+    } elseif (-not [string]::IsNullOrWhiteSpace($packageVersion)) {
+        $packageSpec = "mcp-relay==$packageVersion"
+    } else {
+        $packageSpec = "mcp-relay"
     }
 
     $setupMode = if ([string]::IsNullOrWhiteSpace($env:MCP_RELAY_SETUP)) {
@@ -206,8 +132,10 @@ try {
         }
     }
 
-    Write-Host "Installing the MCP Relay command for the current user..."
-    & $uv tool install --force $projectRoot
+    $uv = Ensure-Uv
+
+    Write-Host "Installing $packageSpec for the current user..."
+    & $uv tool install --force --python 3.14 $packageSpec
     if ($LASTEXITCODE -ne 0) {
         throw "uv tool install failed with exit code $LASTEXITCODE."
     }
@@ -236,8 +164,9 @@ try {
         Write-Host "Skipping interactive onboarding. For unattended deployment, supply ~/.mcp-relay/config.yaml and Server/Client environment variables (or private ~/.mcp-relay/.env) yourself."
     }
 
+    $installedVersion = (& $script:mcpRelayCommand --version | Out-String).Trim()
     Write-Host ""
-    Write-Host "MCP Relay installed for the current user."
+    Write-Host "$installedVersion installed for the current user."
     if ($setupMode -eq "skip") {
         Write-Host "Run guided setup later from a terminal with: mcp-relay onboard"
     }
