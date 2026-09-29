@@ -11,6 +11,7 @@ through a single remote endpoint.
 
 [![CI](https://github.com/kxlion/mcp-relay/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kxlion/mcp-relay/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/mcp-relay.svg)](https://pypi.org/project/mcp-relay/)
+[![Docker image](https://img.shields.io/badge/docker-ghcr.io-blue.svg?logo=docker&logoColor=white)](https://github.com/kxlion/mcp-relay/pkgs/container/mcp-relay)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/kxlion/mcp-relay/blob/main/LICENSE)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://github.com/kxlion/mcp-relay/blob/main/pyproject.toml)
 
@@ -37,8 +38,9 @@ MCP Relay works with MCP servers you supply, using `stdio` or Streamable HTTP.
 It does not bundle or guarantee any particular server. The actions your AI can
 perform depend on the servers you configure and their own permissions.
 
-> **Project status:** the MVP is implemented. There is no stable release or
-> compatibility guarantee yet. The current setup supports one Relay Server,
+> **Project status:** alpha. [v0.1.0](https://github.com/kxlion/mcp-relay/releases/tag/v0.1.0)
+> is the first release; configuration and the Server/Client contract may still
+> change between `0.x` versions. The current setup supports one Relay Server,
 > one Relay Client, one user and one computer.
 
 ## How it works
@@ -101,7 +103,9 @@ uv tool install mcp-relay
 ```
 
 uv downloads Python 3.14 when it is not already available. Guided setup
-(`mcp-relay onboard`) is covered in steps 3 and 4.
+(`mcp-relay onboard`) is covered in steps 3 and 4. On the cloud host, you can
+run the Server from its Docker image instead; see
+[Run the Server with Docker](#3-start-the-cloud-server) in step 3.
 
 Without uv, use the one-line installers instead.
 
