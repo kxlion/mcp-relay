@@ -1,6 +1,6 @@
 # Run and configure MCP Relay
 
-[README](../README.md) · [Tools](tools.md) · [Protocol](protocol.md)
+[README](../README.md) · [Deployment](deployment.md) · [Tools](tools.md) · [Protocol](protocol.md)
 
 Use this guide after [installation](../README.md#get-started) to configure the
 cloud Server, connect your local Client and diagnose problems. Commands below
@@ -24,6 +24,42 @@ Use the default configuration directory. The public CLI accepts no custom
 configuration path. Run onboarding without flags; it requires an interactive
 terminal.
 
+## Install and upgrade
+
+MCP Relay is published on [PyPI](https://pypi.org/project/mcp-relay/):
+
+```sh
+uv tool install mcp-relay
+uv tool upgrade mcp-relay
+```
+
+uv downloads Python 3.14 when it is not already available. To pin a release,
+for example in a script or CI job, install `mcp-relay==<version>`.
+
+The one-line installers (`scripts/install.sh` for Linux and macOS, which needs
+Bash and `curl`, and `scripts/install.ps1` for Windows PowerShell 5.1 or newer)
+set up uv, install the same package for your user account and start guided
+setup when a terminal is available. In the installer's environment:
+
+| Variable | Effect |
+|---|---|
+| `MCP_RELAY_VERSION=<version>` | Install that release instead of the latest |
+| `MCP_RELAY_SETUP=skip` | Skip guided setup |
+
+To inspect an installer before running it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kxlion/mcp-relay/main/scripts/install.sh -o install-mcp-relay.sh
+less install-mcp-relay.sh
+bash install-mcp-relay.sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/kxlion/mcp-relay/main/scripts/install.ps1 -OutFile .\install-mcp-relay.ps1
+Get-Content .\install-mcp-relay.ps1
+.\install-mcp-relay.ps1
+```
+
 ## Prepare credentials and run setup
 
 Supply credentials through the process environment or a private `.env` file
@@ -37,7 +73,8 @@ Client onboarding.
 
 Use two different, randomly generated secrets. Each must be 32–256 printable
 ASCII characters without spaces. Store `.env` with access restricted to your
-account (`0600` on Linux and macOS). Do not put credentials in YAML or command arguments.
+account (`0600` on Linux and macOS). Do not put credentials in YAML, command
+arguments or URLs, and transfer them between machines through a secure channel.
 MCP Relay does not generate or persist these tokens for you.
 
 ```sh
@@ -135,6 +172,28 @@ reports `disk_differs` when alias settings on disk have diverged from runtime.
 For a live connection check, ask your AI to call `relay_status`. It reports the
 Server's view and, when the Client answers, a `live` report of its MCP servers.
 
+## Connect your AI agent
+
+Add an MCP connection to your cloud AI agent:
+
+| Setting | Value |
+|---|---|
+| Transport | Streamable HTTP |
+| URL | `https://relay.example.com/mcp` with your hostname |
+| Authorization header | `Bearer <your RELAY_MCP_TOKEN>` |
+
+Supply the token through your AI host's secret settings. For clients using the
+following configuration format and supporting environment interpolation:
+
+```yaml
+mcp_servers:
+  mcp_relay:
+    url: https://relay.example.com/mcp
+    headers:
+      Authorization: "Bearer ${RELAY_MCP_TOKEN}"
+    supports_parallel_tool_calls: false
+```
+
 ## Change Client settings
 
 ```sh
@@ -180,9 +239,11 @@ copied into the log. Third-party result content is not secret-scanned by Relay.
 
 | Symptom | Action |
 |---|---|
+| Command not found after installation | Open a new terminal to pick up the updated `PATH` |
 | Startup names an invalid token | Check that variable in the runtime environment or private `.env`, including its length and whitespace |
 | Client cannot register | Compare `RELAY_CLIENT_TOKEN` on both machines; check WSS routing to the Client listener |
-| AI cannot reach `/mcp` | Check the MCP token and proxy route to the MCP listener |
+| AI cannot reach `/mcp` | Check the HTTPS URL, the MCP token and the proxy route to the MCP listener |
+| `client_unavailable` | Keep the local Client running; check its token, WSS URL and proxy route to the Client listener |
 | Configuration changes have no effect | Inspect `config show` for environment overrides and restart the Client after YAML edits |
 | `permission_denied` on administration | Explicitly set `admin: true` locally and restart, if administration is intended |
 | One MCP server is unavailable | Inspect `relay_status` and `client.log`; check that server's launcher, credentials and dependencies |

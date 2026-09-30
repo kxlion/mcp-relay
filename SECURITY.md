@@ -6,10 +6,10 @@ MCP Relay is experimental, pre-1.0 software. It does not currently have a
 production-ready or long-term-supported release. Security fixes are applied on
 a best-effort basis to the current development line.
 
-Read the [README](README.md#get-started) for the deployment boundaries (TLS
-proxy, private listeners, tokens) and [`docs/protocol.md`](docs/protocol.md)
-for the relay contract and its bounds. Do not expose the Relay Server directly to
-the public internet or use personal sessions, profiles, credentials or data
+Read [`docs/deployment.md`](docs/deployment.md) and [`docs/cli.md`](docs/cli.md)
+for the deployment boundaries (TLS proxy, private listeners, tokens) and
+[`docs/protocol.md`](docs/protocol.md) for the relay contract and its bounds.
+Do not expose the Relay Server directly to the public internet or use personal sessions, profiles, credentials or data
 for testing.
 
 ## Reporting a vulnerability
