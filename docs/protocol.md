@@ -1,6 +1,6 @@
 # Protocol reference
 
-[README](../README.md) · [Tools](tools.md) · [CLI](cli.md) · [CI](ci.md)
+[README](../README.md) · [Deployment](deployment.md) · [Tools](tools.md) · [CLI](cli.md) · [CI](ci.md)
 
 This page describes the Relay Server–Client wire contract and how it carries MCP
 calls. For installation, start with the README; for public tool arguments, use

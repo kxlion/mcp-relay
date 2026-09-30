@@ -1,6 +1,6 @@
 # Discover and use your MCP tools
 
-[README](../README.md) · [CLI and configuration](cli.md) · [Protocol](protocol.md)
+[README](../README.md) · [Deployment](deployment.md) · [CLI and configuration](cli.md) · [Protocol](protocol.md)
 
 Your cloud AI connects to one MCP Relay endpoint. From there it sees the tools
 of the MCP servers you configured on your computer, plus a few Relay tools.
