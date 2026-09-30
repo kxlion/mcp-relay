@@ -32,7 +32,9 @@ from mcp_relay.provider_tools import ProviderToolDescriptor
 from mcp_relay.server import RelaySettings
 
 _HOST = "127.0.0.1"
-_CLIENT_HOST = "127.0.0.2"
+# A second loopback address every supported platform configures by default;
+# macOS, unlike Linux and Windows, does not answer on all of 127.0.0.0/8.
+_CLIENT_HOST = "::1"
 
 
 def _settings(
@@ -54,7 +56,8 @@ def _settings(
 
 
 def _listener(host: str = _HOST, port: int = 0) -> socket.socket:
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    listener = socket.socket(family, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind((host, port))
     listener.listen()
@@ -719,7 +722,7 @@ def _nonloopback_address() -> str | None:
         return None
     finally:
         probe.close()
-    if not address or address.startswith("127.") or address == _CLIENT_HOST:
+    if not address or address.startswith("127."):
         return None
     return address
 

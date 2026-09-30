@@ -7,7 +7,7 @@
 Connect your cloud AI agent to the local MCP servers you choose,
 through a single remote endpoint.
 
-**Windows & Linux · Outbound connection · Your choice of MCP servers**
+**Windows, macOS & Linux · Outbound connection · Your choice of MCP servers**
 
 [![CI](https://github.com/kxlion/mcp-relay/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kxlion/mcp-relay/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/mcp-relay.svg)](https://pypi.org/project/mcp-relay/)
@@ -38,10 +38,11 @@ MCP Relay works with MCP servers you supply, using `stdio` or Streamable HTTP.
 It does not bundle or guarantee any particular server. The actions your AI can
 perform depend on the servers you configure and their own permissions.
 
-> **Project status:** alpha. [v0.1.0](https://github.com/kxlion/mcp-relay/releases/tag/v0.1.0)
-> is the first release; configuration and the Server/Client contract may still
-> change between `0.x` versions. The current setup supports one Relay Server,
-> one Relay Client, one user and one computer.
+> **Project status:** alpha. Configuration and the Server/Client contract may
+> still change between releases; read the
+> [release notes](https://github.com/kxlion/mcp-relay/releases) before
+> upgrading. The current setup supports one Relay Server, one Relay Client, one
+> user and one computer.
 
 ## How it works
 
@@ -89,8 +90,8 @@ to a remote server.
 ## Get started
 
 You need a cloud AI agent supporting MCP over Streamable HTTP with an
-Authorization header, a cloud host for Relay Server, and your Windows or Linux
-computer. For remote access, provide an HTTPS/WSS address through a TLS reverse
+Authorization header, a cloud host for Relay Server, and your Windows, macOS or
+Linux computer. For remote access, provide an HTTPS/WSS address through a TLS reverse
 proxy or secure tunnel. MCP Relay does not provision hosting, DNS or TLS.
 
 ### 1. Install on the cloud host and your computer
@@ -104,12 +105,12 @@ uv tool install mcp-relay
 
 uv downloads Python 3.14 when it is not already available. Upgrade later with
 `uv tool upgrade mcp-relay`. To pin a release, for example in a script or CI
-job, install `mcp-relay==0.1.0`.
+job, install `mcp-relay==<version>`.
 
 **Without uv**, the one-line installers set up uv, install the same package from
 PyPI for your user account and start guided setup when a terminal is available.
 
-**Linux** - requires Bash and `curl`:
+**Linux and macOS** - requires Bash and `curl`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kxlion/mcp-relay/main/scripts/install.sh | bash
@@ -122,7 +123,7 @@ iex (irm https://raw.githubusercontent.com/kxlion/mcp-relay/main/scripts/install
 ```
 
 These commands run a remote script that installs the latest release. In the
-installer's environment, set `MCP_RELAY_VERSION=0.1.0` to pin a release and
+installer's environment, set `MCP_RELAY_VERSION=<version>` to pin a release and
 `MCP_RELAY_SETUP=skip` to skip guided setup.
 
 Guided setup (`mcp-relay onboard`) is covered in steps 3 and 4: choose
@@ -135,7 +136,7 @@ cancel setup and rerun `mcp-relay onboard` when ready.
 <details>
 <summary>Inspect the installer before running it</summary>
 
-Linux:
+Linux and macOS:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kxlion/mcp-relay/main/scripts/install.sh -o install-mcp-relay.sh
@@ -166,7 +167,7 @@ environment variables or a private `~/.mcp-relay/.env` file:
 Each token must contain **32–256 printable ASCII characters without spaces**.
 Use a secure secret generator; length alone does not make a token secure.
 On Windows, the default directory is `%USERPROFILE%\.mcp-relay`.
-Restrict the `.env` file to your user account (`0600` on Linux).
+Restrict the `.env` file to your user account (`0600` on Linux and macOS).
 
 MCP Relay does not generate or save tokens for you. The Client token must be
 available before Client onboarding. Keep tokens out of YAML, command arguments
@@ -221,9 +222,9 @@ choose private bind addresses it can reach and restrict access with a firewall.
 
 Each release publishes a Server image for `linux/amd64` and `linux/arm64` on
 [GitHub Container Registry](https://github.com/kxlion/mcp-relay/pkgs/container/mcp-relay),
-tagged with its version (`0.1.0`, `0.1`) and `latest`. It needs no configuration
-file: put both tokens in a private `.env` file as plain `KEY=value` lines, then
-run:
+tagged with its full version, its `<major>.<minor>` and `latest`. It needs no
+configuration file: put both tokens in a private `.env` file as plain
+`KEY=value` lines, then run:
 
 ```sh
 docker run -d --name mcp-relay --restart unless-stopped --env-file .env \

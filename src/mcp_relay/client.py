@@ -1,4 +1,4 @@
-"""Outbound Linux Relay client and its deliberately small local configuration."""
+"""Outbound Relay client and its deliberately small local configuration."""
 
 from __future__ import annotations
 

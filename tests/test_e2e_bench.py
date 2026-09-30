@@ -1,4 +1,4 @@
-"""Portable Linux/Windows E2E: real server + client, real npm MCP server.
+"""Portable Linux/macOS/Windows E2E: real server + client, real npm MCP server.
 
 Integration fixture for the CI E2E bench. It boots the real ``mcp-relay
 server`` and ``mcp-relay client`` as subprocesses in an isolated temporary
@@ -35,6 +35,8 @@ import pytest
 import yaml
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+
+from tests.processes import process_command_lines
 
 pytestmark = pytest.mark.integration
 
@@ -155,39 +157,6 @@ def _wait_for_log(path: pathlib.Path, needle: str, deadline: float = 90.0) -> No
             return
         time.sleep(0.2)
     raise AssertionError(f"{needle!r} not found in {path} within {deadline}s")
-
-
-def _foreign_cmdlines() -> list[str]:
-    """Command lines of leftover relay / node bench processes (portable)."""
-    cmdlines: list[str] = []
-    proc = pathlib.Path("/proc")
-    if proc.is_dir():  # POSIX: direct /proc scan
-        for entry in proc.iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                raw = (entry / "cmdline").read_bytes()
-            except OSError:
-                continue
-            cmdline = raw.replace(b"\x00", b" ").decode(errors="replace")
-            if cmdline.strip():
-                cmdlines.append(cmdline)
-        return cmdlines
-    # Windows: PowerShell CIM query (wmic is deprecated).
-    result = subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            "Get-CimInstance Win32_Process | "
-            "ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    return result.stdout.splitlines()
 
 
 def _terminate(process: subprocess.Popen[bytes] | None) -> None:
@@ -455,7 +424,7 @@ def test_real_filesystem_e2e_bench(tmp_path: pathlib.Path) -> None:
     assert client_proc is not None and client_proc.poll() is not None
     leftovers = [
         line
-        for line in _foreign_cmdlines()
+        for line in process_command_lines()
         if str(fs_entry) in line
     ]
     assert leftovers == [], leftovers
