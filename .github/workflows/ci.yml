@@ -1,6 +1,6 @@
 # CI for mcp-relay: static checks on Linux, unit tests and E2E (integration
-# suite including the filesystem bench) on Ubuntu and Windows, a Docker image
-# smoke test, all in parallel, then a fail-closed aggregate gate. No
+# suite including the filesystem bench) on Ubuntu, macOS and Windows, a Docker
+# image smoke test, all in parallel, then a fail-closed aggregate gate. No
 # publication/deployment anywhere.
 #
 # Third-party actions are pinned to full commit SHAs (version in comment).
@@ -72,6 +72,8 @@ jobs:
         include:
           - os: ubuntu-latest
             label: linux
+          - os: macos-latest
+            label: macos
           - os: windows-latest
             label: windows
     steps:
@@ -117,6 +119,8 @@ jobs:
         include:
           - os: ubuntu-latest
             label: linux
+          - os: macos-latest
+            label: macos
           - os: windows-latest
             label: windows
     steps:
@@ -141,8 +145,8 @@ jobs:
 
       # Real user path: install with the one-line installer from THIS
       # checkout (not GitHub main). No onboarding, no shell-profile writes.
-      - name: One-line installer (user path, Linux)
-        if: ${{ matrix.os == 'ubuntu-latest' }}
+      - name: One-line installer (user path, Linux and macOS)
+        if: ${{ matrix.os != 'windows-latest' }}
         env:
           MCP_RELAY_PROJECT_ROOT: ${{ github.workspace }}
           MCP_RELAY_SETUP: skip

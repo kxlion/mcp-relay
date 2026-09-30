@@ -5,10 +5,13 @@ set -euo pipefail
 package_version="${MCP_RELAY_VERSION:-}"
 project_root="${MCP_RELAY_PROJECT_ROOT:-}"
 
-if [[ "$(uname -s)" != "Linux" ]]; then
-    printf 'MCP Relay Linux installer requires Linux.\n' >&2
-    exit 1
-fi
+case "$(uname -s)" in
+    Linux|Darwin) ;;
+    *)
+        printf 'MCP Relay installer requires Linux or macOS.\n' >&2
+        exit 1
+        ;;
+esac
 if [[ -n "$package_version" && ! "$package_version" =~ ^[0-9]+(\.[0-9]+){1,2}([a-z]+[0-9]+)?$ ]]; then
     printf 'MCP_RELAY_VERSION must be a release version such as 0.1.0.\n' >&2
     exit 1

@@ -1,4 +1,4 @@
-"""Cross-platform process liveness check for reaping assertions.
+"""Cross-platform process checks for reaping assertions.
 
 ``os.kill(pid, 0)`` is a harmless probe on POSIX only: on Windows signal 0 is
 CTRL_C_EVENT, which is sent to a console process group and fails with
@@ -9,6 +9,8 @@ handle instead.
 from __future__ import annotations
 
 import os
+import pathlib
+import subprocess
 import sys
 
 
@@ -54,3 +56,42 @@ def _windows_process_exists(pid: int) -> bool:
         return exit_code.value == still_active
     finally:
         kernel32.CloseHandle(handle)
+
+
+def process_command_lines() -> list[str]:
+    """Return the command line of every running process.
+
+    Linux is read from ``/proc``, macOS from ``ps`` (it has no ``/proc``) and
+    Windows from a PowerShell CIM query (``wmic`` is deprecated).
+    """
+    if sys.platform == "win32":
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process | "
+            "ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }",
+        ]
+    elif sys.platform == "linux":
+        return _proc_command_lines()
+    else:
+        command = ["ps", "-axww", "-o", "command="]
+    result = subprocess.run(
+        command, capture_output=True, text=True, timeout=60, check=True
+    )
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def _proc_command_lines() -> list[str]:
+    command_lines: list[str] = []
+    for entry in pathlib.Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        command_line = raw.replace(b"\x00", b" ").decode(errors="replace")
+        if command_line.strip():
+            command_lines.append(command_line)
+    return command_lines

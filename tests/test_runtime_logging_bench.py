@@ -40,6 +40,8 @@ import yaml
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from tests.processes import process_command_lines
+
 pytestmark = pytest.mark.integration
 
 MCP_TOKEN = "bench-mcp-token-logs-synthetic-credential-0000000000000000"
@@ -152,25 +154,6 @@ def _wait_for_log(path: pathlib.Path, needle: str, deadline: float = 60.0) -> No
             return
         time.sleep(0.2)
     raise AssertionError(f"{needle!r} not found in {path} within {deadline}s")
-
-
-def _proc_cmdlines() -> list[str]:
-    # /proc is Linux-only; no cross-platform equivalent is in the dependency
-    # set, so leftover-process detection stays POSIX-scoped.
-    if not pathlib.Path("/proc").is_dir():
-        return []
-    cmdlines: list[str] = []
-    for entry in pathlib.Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            raw = (entry / "cmdline").read_bytes()
-        except OSError:
-            continue
-        cmdline = raw.replace(b"\x00", b" ").decode(errors="replace")
-        if cmdline.strip():
-            cmdlines.append(cmdline)
-    return cmdlines
 
 
 def _terminate(process: subprocess.Popen[bytes] | None) -> None:
@@ -410,7 +393,7 @@ def test_real_runtime_logging_bench(tmp_path: pathlib.Path) -> None:
         assert CLIENT_TOKEN not in captured
 
     # --- Cleanup: no leftover relay processes, ports freed.
-    leftovers = [line for line in _proc_cmdlines() if "mcp_relay.cli" in line]
+    leftovers = [line for line in process_command_lines() if "mcp_relay.cli" in line]
     assert leftovers == [], leftovers
     # Windows may keep a killed process's listener in TIME_WAIT for a few
     # seconds; poll instead of failing on the first probe.

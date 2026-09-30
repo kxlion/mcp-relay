@@ -37,7 +37,7 @@ Client onboarding.
 
 Use two different, randomly generated secrets. Each must be 32–256 printable
 ASCII characters without spaces. Store `.env` with access restricted to your
-account (`0600` on Linux). Do not put credentials in YAML or command arguments.
+account (`0600` on Linux and macOS). Do not put credentials in YAML or command arguments.
 MCP Relay does not generate or persist these tokens for you.
 
 ```sh
@@ -54,7 +54,7 @@ provide the environment, private `.env` and Client YAML yourself.
 
 ## Where settings live
 
-The default directory is `~/.mcp-relay` on Linux and
+The default directory is `~/.mcp-relay` on Linux and macOS and
 `%USERPROFILE%\.mcp-relay` on Windows.
 
 | File | Contents |

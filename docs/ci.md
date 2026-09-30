@@ -19,8 +19,10 @@ PyPI, see [Installers](#installers).
 flowchart LR
     Checks[checks - Linux] --> Gate[ci-required]
     UnitL[unit linux] --> Gate
+    UnitM[unit macos] --> Gate
     UnitW[unit windows] --> Gate
     E2EL[e2e linux] --> Gate
+    E2EM[e2e macos] --> Gate
     E2EW[e2e windows] --> Gate
     Docker[docker - Linux amd64] --> Gate
 ```
@@ -28,8 +30,8 @@ flowchart LR
 | Job | Runs | What a passing result establishes |
 |---|---|---|
 | `checks` | Lockfile check, diff whitespace check, Ruff, actionlint, zizmor and shellcheck on Linux | The code, workflows and shell scripts pass these static checks |
-| `unit linux`, `unit windows` | Non-integration tests | The unit suite passes on that platform |
-| `e2e linux`, `e2e windows` | Installer, installed CLI smoke checks and integration tests | The exercised installation and integration paths pass on that platform |
+| `unit linux`, `unit macos`, `unit windows` | Non-integration tests | The unit suite passes on that platform |
+| `e2e linux`, `e2e macos`, `e2e windows` | Installer, installed CLI smoke checks and integration tests | The exercised installation and integration paths pass on that platform |
 | `docker` | Builds the Dockerfile for `linux/amd64` and runs the image smoke test | The image builds and its Relay Server starts and authenticates |
 | `ci-required` | Aggregate result check | Every job above and every matrix leg succeeded |
 
@@ -44,8 +46,9 @@ changes.
 
 ## What the E2E bench exercises
 
-Both platforms install MCP Relay from the checked-out commit using the platform
-installer, with onboarding and shell-profile changes disabled. The workflow
+Each platform installs MCP Relay from the checked-out commit using its
+installer (`install.sh` on Linux and macOS, `install.ps1` on Windows), with
+onboarding and shell-profile changes disabled. The workflow
 sets `MCP_RELAY_BIN` to that installed executable and checks its `--help` and
 `--version` before running the integration suite.
 
@@ -71,8 +74,10 @@ JUnit artifact:
 | Artifact | File | Retention |
 |---|---|---|
 | `reports-unit-linux` | `reports/unit.xml` | 7 days |
+| `reports-unit-macos` | `reports/unit.xml` | 7 days |
 | `reports-unit-windows` | `reports/unit.xml` | 7 days |
 | `reports-e2e-linux` | `reports/integration.xml` | 7 days |
+| `reports-e2e-macos` | `reports/integration.xml` | 7 days |
 | `reports-e2e-windows` | `reports/integration.xml` | 7 days |
 
 Reports are uploaded after a job finishes even when tests fail, unless the run
@@ -144,7 +149,7 @@ GitHub release is published. It never runs on pushes or pull requests.
 |---|---|---|
 | `build` | Checks that the release tag equals `v` + the `pyproject.toml` version and that `ci-required` succeeded on the tagged commit, builds the sdist and wheel, then installs each one in an isolated environment and checks `mcp-relay --version` | The tagged commit passed CI, and both distributions install and report the declared version |
 | `publish to PyPI` | Uploads the built files with `uv publish` | PyPI accepted the files for that version |
-| `one-line installers` | Runs the [Installers](#installers) workflow for that version | Both one-line installers install the new release from PyPI |
+| `one-line installers` | Runs the [Installers](#installers) workflow for that version | The one-line installers install the new release from PyPI on Linux, macOS and Windows |
 
 Publishing uses PyPI Trusted Publishing: PyPI trusts the `release.yml`
 workflow of this repository in the `pypi` environment, and GitHub issues a
@@ -192,8 +197,8 @@ repository. The CI `docker` job runs the same smoke test on every change, for
 ## Installers
 
 The [installers workflow](../.github/workflows/installers.yml) runs
-`scripts/install.sh` on Ubuntu and `scripts/install.ps1` on Windows the way a
-user does, without `MCP_RELAY_PROJECT_ROOT`, so the package comes from PyPI.
+`scripts/install.sh` on Ubuntu and macOS and `scripts/install.ps1` on Windows
+the way a user does, without `MCP_RELAY_PROJECT_ROOT`, so the package comes from PyPI.
 Each job passes when the installer reports the expected version as installed.
 
 | Trigger | Installs | Expected version |
